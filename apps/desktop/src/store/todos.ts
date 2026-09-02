@@ -132,6 +132,20 @@ export function clearSessionTodos(sid: string) {
   dropSessionTodos(sid, true)
 }
 
+/** Drop every session's revision watermark. Call on gateway reconnect /
+ *  runtime re-mint, alongside {@link resetBackgroundPollingGuard}: a respawned
+ *  backend's TodoStore starts over (fresh in-memory revision counter re-seeded
+ *  from history — see `_hydrate_todo_store`), so the client's remembered
+ *  watermark can sit ABOVE what the new backend will ever send. Left
+ *  unreset, `acceptRevision` rejects every live update as stale forever and
+ *  the "Tasks N/M" panel freezes until a coincidentally-higher revision
+ *  arrives — indistinguishable from the panel being stuck. Session todo
+ *  lists themselves are left alone; only the arbitration watermark resets, so
+ *  the next snapshot (of any revision) is accepted and repaints the panel. */
+export function resetTodoRevisions(): void {
+  $todoRevisionsBySession.set({})
+}
+
 // Drop a still-active todo list (any pending/in_progress item) — used at turn
 // end, when an unfinished list means the turn stopped without a final `todo`
 // update, so the "Tasks N/M" panel would otherwise stay pinned above the

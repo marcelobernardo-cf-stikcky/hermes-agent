@@ -543,6 +543,17 @@ async function openSecondary(entry: Secondary): Promise<void> {
         .catch(() => {
           // Best effort for partial test/HMR graphs, same as above.
         })
+
+      // Same re-mint staleness hits the todo-panel revision watermark (see
+      // use-gateway-boot.ts's primary-path reset for the full rationale) —
+      // a respawned secondary's TodoStore starts its revision counter over,
+      // so an unreset client watermark can outrank every future update and
+      // freeze that session's "Tasks N/M" panel forever.
+      void import('@/store/todos')
+        .then(({ resetTodoRevisions }) => resetTodoRevisions())
+        .catch(() => {
+          // Best effort for partial test/HMR graphs, same as above.
+        })
     }
 
     // Registry-scoped entries dial through getConnectionFor when the bridge has

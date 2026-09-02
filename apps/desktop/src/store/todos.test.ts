@@ -7,6 +7,7 @@ import {
   $todosBySession,
   clearActiveSessionTodos,
   clearSessionTodos,
+  resetTodoRevisions,
   restoreSessionTodosFromSnapshot,
   setSessionTodos,
   todosForHydration
@@ -151,5 +152,25 @@ describe('revisioned snapshots', () => {
 
     setSessionTodos('s1', [todo('a', 'in_progress')])
     expect($todosBySession.get().s1?.[0]?.id).toBe('a')
+  })
+
+  it('resetTodoRevisions clears every watermark so a restarted backend is not locked out (#gateway-restart-freeze)', () => {
+    // A respawned backend's TodoStore revision counter starts over, so it can
+    // legitimately re-send revision 1 while the client remembers a higher
+    // watermark from before the restart. Without a reset, that lower revision
+    // (and everything after it, until the counter climbs back past the old
+    // watermark) is rejected as stale and the panel freezes.
+    setSessionTodos('s1', [todo('old', 'in_progress')], 9)
+    expect($todoRevisionsBySession.get().s1).toBe(9)
+
+    setSessionTodos('s1', [todo('restarted', 'in_progress')], 1)
+    expect($todosBySession.get().s1?.[0]?.id).toBe('old')
+
+    resetTodoRevisions()
+    expect($todoRevisionsBySession.get()).toEqual({})
+
+    setSessionTodos('s1', [todo('restarted', 'in_progress')], 1)
+    expect($todosBySession.get().s1?.[0]?.id).toBe('restarted')
+    expect($todoRevisionsBySession.get().s1).toBe(1)
   })
 })
