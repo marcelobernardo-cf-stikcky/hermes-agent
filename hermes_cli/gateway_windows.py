@@ -46,6 +46,7 @@ from hermes_cli._subprocess_compat import (
     windows_detach_flags_without_breakaway,
     windows_hide_flags,
 )
+from gateway.restart import GATEWAY_FATAL_CONFIG_EXIT_CODE
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ _TASK_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
 _TASK_LOGON_DELAY = "PT30S"
 _TASK_RESTART_INTERVAL = "PT1M"
 _TASK_RESTART_COUNT = 999
+_GATEWAY_VBS_RESTART_DELAY_MS = 5000
 
 
 def _schtasks_encoding() -> str:
@@ -480,7 +482,11 @@ def _build_gateway_vbs_script(
     by every console-subsystem descendant (git, gh, node, …) so none of them
     allocate a visible flashing conhost (#54220/#56747; the previous
     console-less pythonw.exe gateway forced exactly that per-descendant
-    flash). No cmd.exe anywhere in the chain. Mirrors
+    flash). No cmd.exe anywhere in the chain. The VBS process waits for the
+    gateway and supervises its exit: a clean exit (0) and the fatal-config
+    exit code stop the wrapper; every other exit waits briefly and relaunches
+    the child. This keeps both Scheduled Task and Startup-folder installs
+    resilient when the gateway process dies. Mirrors
     ``_build_gateway_cmd_script`` (same env + argv via
     ``_resolve_detached_python``).
     """
@@ -501,7 +507,7 @@ def _build_gateway_vbs_script(
     lines = [
         f"' {_TASK_DESCRIPTION}",
         "Option Explicit",
-        "Dim sh, env, existing_pp",
+        "Dim sh, env, existing_pp, exit_code",
         'Set sh = CreateObject("WScript.Shell")',
         'Set env = sh.Environment("PROCESS")',
         f"env.Item({_quote_vbs_string('HERMES_HOME')}) = {_quote_vbs_string(hermes_home)}",
@@ -518,10 +524,16 @@ def _build_gateway_vbs_script(
         f"  env.Item({_quote_vbs_string('PYTHONPATH')}) = {_quote_vbs_string(static_pythonpath)}",
         "End If",
         f"sh.CurrentDirectory = {_quote_vbs_string(working_dir)}",
-        # Window style 0 = hidden; bWaitOnReturn False = detached/async. The
-        # console python's one console is created hidden and inherited by all
-        # descendants, so nothing ever flashes.
-        f"sh.Run {_quote_vbs_string(command_line)}, 0, False",
+        # Keep wscript.exe alive while the gateway runs so it can supervise the
+        # child. Task Scheduler's RestartOnFailure cannot observe a child that
+        # was launched with bWaitOnReturn=False and then left behind.
+        "Do",
+        f"  exit_code = sh.Run({_quote_vbs_string(command_line)}, 0, True)",
+        f"  If exit_code = 0 Or exit_code = {GATEWAY_FATAL_CONFIG_EXIT_CODE} Then",
+        "    Exit Do",
+        "  End If",
+        f"  WScript.Sleep {_GATEWAY_VBS_RESTART_DELAY_MS}",
+        "Loop",
     ]
     return "\r\n".join(lines) + "\r\n"
 
@@ -995,6 +1007,78 @@ def _spawn_detached(script_path: Path | None = None) -> int:
     return proc.pid
 
 
+def _spawn_supervised() -> int:
+    """Launch the generated VBS supervisor as a detached process.
+
+    The VBS process must stay alive while its Python child runs; it owns the
+    restart loop rendered by :func:`_build_gateway_vbs_script`. Starting the
+    VBS here makes manual ``gateway start`` and ``gateway restart`` use the
+    same recovery path as Windows login persistence.
+    """
+    _assert_windows()
+    vbs_path = get_task_script_path().with_suffix(".vbs")
+    if not vbs_path.is_file():
+        raise FileNotFoundError(f"Windows gateway supervisor not found: {vbs_path}")
+
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    if system_root:
+        candidate = Path(system_root) / "System32" / "wscript.exe"
+        wscript = str(candidate) if candidate.is_file() else "wscript.exe"
+    else:
+        wscript = "wscript.exe"
+
+    argv = [wscript, "//B", "//Nologo", str(vbs_path)]
+    from hermes_cli.config import get_hermes_home
+
+    working_dir = str(Path(get_hermes_home()).resolve())
+    env = {
+        **os.environ,
+        "HERMES_GATEWAY_DETACHED": "1",
+        _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1",
+    }
+    flags = windows_detach_flags()
+    log_dir = Path(get_hermes_home()) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stray_log = log_dir / "gateway-stdio.log"
+
+    try:
+        with open(stray_log, "ab", buffering=0) as log_fh:
+            proc = subprocess.Popen(
+                argv,
+                cwd=working_dir,
+                env=env,
+                creationflags=flags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=log_fh,
+            )
+        _LAST_SPAWN_BREAKAWAY_FALLBACK["fallback"] = False
+    except OSError as exc:
+        error_code = getattr(exc, "winerror", None)
+        if error_code is None:
+            error_code = exc.errno
+        logger.warning(
+            "Gateway supervisor breakaway spawn failed (error=%s); retrying "
+            "without CREATE_BREAKAWAY_FROM_JOB",
+            error_code,
+        )
+        fallback_env = {**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}
+        with open(stray_log, "ab", buffering=0) as log_fh:
+            proc = subprocess.Popen(
+                argv,
+                cwd=working_dir,
+                env=fallback_env,
+                creationflags=windows_detach_flags_without_breakaway(),
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=log_fh,
+            )
+        _LAST_SPAWN_BREAKAWAY_FALLBACK["fallback"] = True
+    return proc.pid
+
+
 def _install_choice_from_env(name: str) -> bool | None:
     raw = os.environ.get(name)
     if raw is None:
@@ -1041,7 +1125,7 @@ def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -
     print(f"  Task script: {script_path}")
 
     # Re-running `hermes -p <profile> gateway install` must be safe.
-    # Startup-folder fallback only installs login persistence. Starting is
+    # Startup-folder fallback installs login persistence and a child supervisor. Starting is
     # controlled by the pre-UAC start_now answer so all user decisions happen
     # before any elevation prompt.
     from hermes_cli.gateway import find_gateway_pids, _profile_arg
@@ -1050,8 +1134,8 @@ def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -
     if running_pids:
         print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
     elif start_now:
-        pid = _spawn_detached()
-        _report_gateway_start(f"direct spawn (PID {pid})")
+        pid = _spawn_supervised()
+        _report_gateway_start(f"VBS supervisor (PID {pid})")
     else:
         profile_arg = _profile_arg()
         start_cmd = f"hermes {profile_arg} gateway start" if profile_arg else "hermes gateway start"
@@ -1126,8 +1210,8 @@ def install(
             if running_pids:
                 print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
             else:
-                pid = _spawn_detached()
-                _report_gateway_start(f"direct spawn (PID {pid})")
+                pid = _spawn_supervised()
+                _report_gateway_start(f"VBS supervisor (PID {pid})")
         else:
             print("ℹ Gateway not started now.")
             print("  Start manually with: hermes gateway start")
@@ -1163,7 +1247,7 @@ def install(
         print(f"  Task script: {script_path}")
 
         # Re-running `hermes -p <profile> gateway install` must be safe.
-        # Startup-folder fallback only installs login persistence. Starting is
+        # Startup-folder fallback installs login persistence and a child supervisor. Starting is
         # controlled by the pre-UAC start_now answer so all user decisions happen
         # before any elevation prompt.
         from hermes_cli.gateway import find_gateway_pids, _profile_arg
@@ -1172,8 +1256,8 @@ def install(
         if running_pids:
             print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
         elif start_now:
-            pid = _spawn_detached()
-            _report_gateway_start(f"direct spawn (PID {pid})")
+            pid = _spawn_supervised()
+            _report_gateway_start(f"VBS supervisor (PID {pid})")
         else:
             profile_arg = _profile_arg()
             start_cmd = f"hermes {profile_arg} gateway start" if profile_arg else "hermes gateway start"
@@ -1744,11 +1828,14 @@ def start() -> None:
             print("  If a UAC prompt opened, approve it, then run: hermes gateway start")
             return
 
-    # Manual starts use the same console-less direct spawn path as restart()
-    # and install --start-now. Scheduled Task / Startup entries are only login
-    # persistence mechanisms.
-    pid = _spawn_detached()
-    _report_gateway_start(f"direct spawn (PID {pid})")
+    # A persistent login mechanism owns the VBS supervisor. Manual starts must
+    # use the same owner so a crash is recovered during the current session too.
+    if task_installed or startup_installed:
+        pid = _spawn_supervised()
+        _report_gateway_start(f"VBS supervisor (PID {pid})")
+    else:
+        pid = _spawn_detached()
+        _report_gateway_start(f"direct spawn (PID {pid})")
 
 
 def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:

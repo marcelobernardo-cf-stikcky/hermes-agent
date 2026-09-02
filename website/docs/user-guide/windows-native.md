@@ -166,7 +166,7 @@ On legacy `cmd.exe` consoles `Ctrl+Enter` collapses to plain `Enter` — use `Es
 
 ## Running the gateway at Windows login
 
-`hermes gateway install` on Windows uses **Scheduled Tasks** with a Startup-folder fallback — no admin required.
+`hermes gateway install` on Windows prefers **Scheduled Tasks** and falls back to a Startup-folder launcher when task creation is blocked. Both paths use a hidden WScript supervisor; the fallback does not require administrator rights.
 
 ### Install
 
@@ -176,11 +176,11 @@ hermes gateway install
 
 What happens under the hood:
 
-1. `schtasks /Create /SC ONLOGON /RL LIMITED /TN HermesGateway` — registers a task that runs at your login with standard (non-elevated) permissions. No UAC prompt.
-2. If schtasks is blocked by group policy, falls back to writing a `start /min cmd.exe /d /c <wrapper>` shortcut into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`. Same effect, slightly cruder.
-3. Spawns the gateway **detached via `pythonw.exe`** — not `python.exe`. `pythonw.exe` has no console attached, which immunizes it against `CTRL_C_EVENT` broadcasts from sibling processes (a real issue that used to kill the gateway when you Ctrl+C'd anything in the same process group).
+1. Attempts `schtasks /Create /SC ONLOGON /RL LIMITED /TN Hermes_Gateway` — registers a task that runs at your login with standard (non-elevated) permissions. If this account's task ACL requires UAC, Hermes reports that and continues with the fallback when elevation is not approved.
+2. If schtasks is blocked by policy or elevation is unavailable, writes a hidden VBS launcher into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`. The VBS supervisor waits for the gateway child and relaunches it after abnormal exits, with a short backoff; clean shutdown and fatal configuration exit stop the loop.
+3. The child is spawned with the console `python.exe` under a hidden window (`CREATE_NO_WINDOW`), not `pythonw.exe`, so descendants inherit one hidden console instead of flashing new consoles.
 
-Flags used when spawning: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`.
+Flags used when spawning: `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`.
 
 ### Manage
 
