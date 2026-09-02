@@ -6409,7 +6409,12 @@ def _tool_lifecycle_required_for_ui(name: str) -> bool:
     # wires request_id from clarify.request. If tool progress is off, suppressing
     # clarify's lifecycle events leaves only the sidebar attention dot visible.
     # setup_mcp is the same shape: its consent card mounts on the tool part.
-    return name in ("clarify", "setup_mcp")
+    # todo is the same class of "not optional chrome" for a different reason:
+    # tool.complete for it is already force-emitted below (`or name == "todo"`)
+    # because task state is application data. Withholding tool.start left an
+    # asymmetry where, with tool progress off, the "Tasks N/M" panel only ever
+    # moved on completion — never at the start of a step — reading as stuck.
+    return name in ("clarify", "setup_mcp", "todo")
 
 
 def _restart_slash_worker(sid: str, session: dict):

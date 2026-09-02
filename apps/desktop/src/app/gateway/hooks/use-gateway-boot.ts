@@ -18,6 +18,7 @@ import {
   setDesktopBootStep
 } from '@/store/boot'
 import { resetBackgroundPollingGuard } from '@/store/composer-status'
+import { resetTodoRevisions } from '@/store/todos'
 import {
   $gateway,
   activeGatewayConnectionId,
@@ -377,6 +378,12 @@ export function useGatewayBoot({
         // those ids may be live again after re-resume — clear the latch with
         // the same lifetime as the runtime bindings it shadows.
         resetBackgroundPollingGuard()
+        // Same staleness for the todo-panel arbitration watermark: a
+        // respawned backend's TodoStore revision counter starts over (see
+        // resetTodoRevisions), so the client's remembered watermark can now
+        // sit above anything the new backend will ever send — freezing the
+        // "Tasks N/M" panel until a coincidentally-higher revision arrives.
+        resetTodoRevisions()
         // Same staleness, other half: pre-reconnect busy flags are keyed by
         // those dead runtime ids and would never receive their terminal
         // busy:false — clear them or the sidebar running arc lies forever

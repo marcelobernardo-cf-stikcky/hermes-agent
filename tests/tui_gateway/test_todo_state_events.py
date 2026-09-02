@@ -98,3 +98,32 @@ def test_empty_list_at_nonzero_revision_is_a_real_clear():
     state = server._normalize_todo_state({"todos": [], "revision": 2})
 
     assert state == {"todos": [], "revision": 2}
+
+
+def test_todo_tool_start_also_bypasses_progress_off():
+    # tool.complete for "todo" was already forced (see the test above); an
+    # asymmetric tool.start left the "Tasks N/M" panel only moving on
+    # completion when a session had tool progress off — reading as stuck for
+    # the whole step, then jumping on finish. tool.start must be just as
+    # unconditional.
+    assert server._tool_lifecycle_required_for_ui("todo") is True
+
+
+def test_todo_start_emits_even_with_progress_off(monkeypatch):
+    sid = "todo-start-test"
+    events = []
+    monkeypatch.setitem(
+        server._sessions,
+        sid,
+        {"tool_started_at": {}, "tool_progress_mode": "off"},
+    )
+    monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: False)
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, event_sid, payload=None: events.append((event, event_sid, payload)),
+    )
+
+    server._on_tool_start(sid, "call-1", "todo", {"todos": []})
+
+    assert [event[0] for event in events] == ["tool.start"]
