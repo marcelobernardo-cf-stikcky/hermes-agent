@@ -2970,6 +2970,11 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Wall-clock ceiling for running tasks whose card sets no
+        # ``max_runtime_seconds``. The dispatcher terminates the worker and
+        # records ``timed_out`` (the failure_limit breaker then applies).
+        # 0 disables the default ceiling (cards keep their own limits).
+        "default_max_runtime_seconds": 1800,
         # Orphaned-card reconciliation: each dispatcher tick, requeue
         # 'running' cards whose claim bookkeeping is broken (claim_lock or
         # claim_expires NULL with a dead/gone worker) — zombies invisible

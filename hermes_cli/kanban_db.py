@@ -7976,6 +7976,10 @@ def schedule_task(
 # a human can investigate. Prevents retry storms when a worker repeatedly times
 # out, crashes, or cannot spawn.
 DEFAULT_FAILURE_LIMIT = 2
+# Wall-clock ceiling applied to any running task whose card does not set
+# ``max_runtime_seconds``. Without it a worker with a live heartbeat runs
+# forever. Overridable via ``kanban.default_max_runtime_seconds``; 0 = off.
+DEFAULT_MAX_RUNTIME_SECONDS = 1800
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
@@ -8435,8 +8439,13 @@ def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
     signal_fn=None,
+    default_max_runtime_seconds: Optional[int] = None,
 ) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
+
+    Tasks without their own limit inherit ``default_max_runtime_seconds``
+    (``kanban.default_max_runtime_seconds``, falling back to
+    ``DEFAULT_MAX_RUNTIME_SECONDS``); 0 restores the legacy no-ceiling behavior.
 
     Sends SIGTERM, waits a short grace window, then SIGKILL. Emits a
     ``timed_out`` event and restores the task's source phase so the next
@@ -8452,16 +8461,22 @@ def enforce_max_runtime(
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    if default_max_runtime_seconds is None:
+        default_max_runtime_seconds = _default_max_runtime_from_config()
+    default_limit = int(default_max_runtime_seconds or 0) or None
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       COALESCE(t.max_runtime_seconds, ?) AS max_runtime_seconds, "
+        "       t.claim_lock "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE t.status = 'running' "
+        "  AND COALESCE(t.max_runtime_seconds, ?) IS NOT NULL "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
-        "  AND t.worker_pid IS NOT NULL"
+        "  AND t.worker_pid IS NOT NULL",
+        (default_limit, default_limit),
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
@@ -8549,6 +8564,22 @@ def enforce_max_runtime(
                 },
             )
     return timed_out
+
+
+def _default_max_runtime_from_config() -> int:
+    """``kanban.default_max_runtime_seconds`` or ``DEFAULT_MAX_RUNTIME_SECONDS``."""
+    try:
+        from hermes_cli.config import load_config
+
+        raw = (load_config().get("kanban") or {}).get("default_max_runtime_seconds")
+    except Exception:
+        raw = None
+    if raw is None:
+        return DEFAULT_MAX_RUNTIME_SECONDS
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RUNTIME_SECONDS
 
 
 # Heartbeat staleness heartbeat gap — if a running task hasn't sent a

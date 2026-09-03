@@ -314,6 +314,53 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
         _kb._pid_alive = original_alive
 
 
+def test_enforce_max_runtime_applies_default_when_card_has_no_limit(kanban_home):
+    """A card without ``max_runtime_seconds`` inherits the dispatcher default
+    instead of running forever behind a live heartbeat."""
+    import hermes_cli.kanban_db as _kb
+    killed = []
+    original_alive = _kb._pid_alive
+    _kb._pid_alive = lambda pid: False
+    try:
+        conn = kb.connect()
+        try:
+            tid = kb.create_task(conn, title="unbounded job", assignee="worker")
+            assert kb.get_task(conn, tid).max_runtime_seconds is None
+            kb.claim_task(conn, tid)
+            kb._set_worker_pid(conn, tid, os.getpid())
+            old_started = int(time.time()) - 120
+            with kb.write_txn(conn):
+                conn.execute("UPDATE tasks SET started_at = ? WHERE id = ?", (old_started, tid))
+                conn.execute(
+                    "UPDATE task_runs SET started_at = ? "
+                    "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                    (old_started, tid),
+                )
+
+            # Default larger than elapsed: nothing happens.
+            assert kb.enforce_max_runtime(
+                conn, signal_fn=lambda p, s: killed.append(p), default_max_runtime_seconds=600,
+            ) == []
+            # 0 = legacy behaviour, no ceiling.
+            assert kb.enforce_max_runtime(
+                conn, signal_fn=lambda p, s: killed.append(p), default_max_runtime_seconds=0,
+            ) == []
+            assert killed == []
+
+            # Default smaller than elapsed: worker is terminated.
+            timed_out = kb.enforce_max_runtime(
+                conn, signal_fn=lambda p, s: killed.append(p), default_max_runtime_seconds=60,
+            )
+            assert timed_out == [tid]
+            assert killed == [os.getpid()]
+            ev = next(e for e in kb.list_events(conn, tid) if e.kind == "timed_out")
+            assert ev.payload["limit_seconds"] == 60
+        finally:
+            conn.close()
+    finally:
+        _kb._pid_alive = original_alive
+
+
 
 
 
