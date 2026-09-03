@@ -7826,6 +7826,27 @@ def run_conversation(
                                 pass
                     break
 
+                # ── Kanban worker: terminal board tool ends the run ────────
+                # Once kanban_complete / kanban_block / kanban_request_review
+                # returned ok, the board owns the task. Every further turn is
+                # budget spent on work nobody asked for (self-review, extra
+                # polish, ad-hoc edits after handoff). Stop here.
+                try:
+                    from agent.kanban_stop import kanban_terminal_reached
+
+                    _kanban_terminal = kanban_terminal_reached(
+                        messages, assistant_message.tool_calls
+                    )
+                except Exception:
+                    logger.debug("kanban terminal check failed", exc_info=True)
+                    _kanban_terminal = None
+                if _kanban_terminal:
+                    _turn_exit_reason = "kanban_terminal"
+                    final_response = f"Task handed to the board via {_kanban_terminal}."
+                    agent._emit_status(f"✅ Kanban worker finished: {_kanban_terminal}")
+                    append_message(messages, {"role": "assistant", "content": final_response})
+                    break
+
                 # Reset per-turn retry counters after successful tool
                 # execution so a single truncation doesn't poison the
                 # entire conversation.
