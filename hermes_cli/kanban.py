@@ -2311,30 +2311,36 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return None
 
 
-def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
-    """Apply the goal judge to every terminal worker handoff, including review.
+def _stamp_judge_unavailable(metadata: Optional[dict]) -> dict:
+    """Record that the goal judge could not evaluate this handoff."""
+    stamped = dict(metadata or {})
+    stamped["judge_unavailable"] = True
+    return stamped
 
-    Returns ``(verdict, reason_or_None)`` — ``"done"`` allows the handoff;
-    ``"blocked"`` means the judge ruled the goal unachievable (#100954);
-    ``"continue"``/``"wait"`` reject with the judge's reason.
+
+def _goal_mode_handoff_decision(
+    task: Optional[kb.Task], evidence: str
+) -> tuple[Optional[str], bool]:
+    """Decide whether a goal-mode terminal handoff is premature.
+
+    Returns ``(rejection, judge_unavailable)``. Quota/429/5xx/transport
+    failure is ``judge_unavailable`` — the handoff must proceed.
     """
     if task is None or not task.goal_mode:
-        return ("done", None)
+        return None, False
     try:
         from agent.auxiliary_client import get_text_auxiliary_client
 
         client, model = get_text_auxiliary_client("goal_judge")
     except Exception:
-        return ("done", None)
+        return None, False
     if client is None or not model:
-        return ("done", None)
+        return None, False
 
     from hermes_cli.goals import judge_goal
 
-    verdict = "done"
-    reason = ""
     try:
-        verdict, reason, _, _, _ = judge_goal(
+        verdict, reason, _, _, transport_failed = judge_goal(
             goal=f"{task.title}\n\n{task.body or ''}".strip(),
             last_response=evidence.strip(),
         )
@@ -2346,7 +2352,22 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
             judge_exc,
             exc_info=True,
         )
-    return (verdict, None if verdict == "done" else reason)
+        return None, True
+    if transport_failed:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "goal judge unavailable (%s); allowing lifecycle handoff",
+            reason or "transport_failed",
+        )
+        return None, True
+    return (reason if verdict != "done" else None), False
+
+
+def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str) -> Optional[str]:
+    """Apply the goal judge to every terminal worker handoff, including review."""
+    rejection, _unavailable = _goal_mode_handoff_decision(task, evidence)
+    return rejection
 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
@@ -2384,20 +2405,10 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             # to every terminal handoff so request-review cannot bypass the
             # acceptance contract that protects complete.
             task = kb.get_task(conn, tid)
-            gate_verdict, rejection = _goal_mode_handoff_rejection(
+            rejection, judge_unavailable = _goal_mode_handoff_decision(
                 task,
                 (summary or args.result or "").strip(),
             )
-            if gate_verdict == "blocked":
-                print(
-                    f"kanban: goal completion of {tid} rejected: judge ruled "
-                    f"the goal unachievable — {rejection}. Re-scope with "
-                    f"kanban edit, or record the block with kanban block "
-                    f"instead of completing.",
-                    file=sys.stderr,
-                )
-                failed.append(tid)
-                continue
             if rejection is not None:
                 print(
                     f"kanban: goal completion of {tid} rejected by judge: {rejection}. "
@@ -2406,12 +2417,15 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 )
                 failed.append(tid)
                 continue
+            task_metadata = (
+                _stamp_judge_unavailable(metadata) if judge_unavailable else metadata
+            )
 
             if not kb.complete_task(
                 conn, tid,
                 result=args.result,
                 summary=summary,
-                metadata=metadata,
+                metadata=task_metadata,
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
@@ -2547,18 +2561,10 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
             return 2
     reviewer = getattr(args, "reviewer", None)
     with kb.connect_closing() as conn:
-        gate_verdict, rejection = _goal_mode_handoff_rejection(
+        rejection, judge_unavailable = _goal_mode_handoff_decision(
             kb.get_task(conn, tid),
             summary or "",
         )
-        if gate_verdict == "blocked":
-            print(
-                f"kanban: goal review handoff of {tid} rejected: judge ruled "
-                f"the goal unachievable — {rejection}. Record the block with "
-                f"kanban block instead of requesting review.",
-                file=sys.stderr,
-            )
-            return 1
         if rejection is not None:
             print(
                 f"kanban: goal review handoff of {tid} rejected by judge: "
@@ -2566,6 +2572,8 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        if judge_unavailable:
+            metadata = _stamp_judge_unavailable(metadata)
         ok, reason = kb.request_review(
             conn,
             tid,

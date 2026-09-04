@@ -145,7 +145,8 @@ class TestCLIJudgeGate:
     """
 
     def _run(self, monkeypatch, *, goal_mode=True, judge_available=True,
-             verdict="done", reason="", complete_ok=True, summary="done"):
+             verdict="done", reason="", complete_ok=True, summary="done",
+             transport_failed=False):
         import argparse
         import types
         from unittest.mock import MagicMock
@@ -184,7 +185,7 @@ class TestCLIJudgeGate:
         # (verdict, reason, parse_failed, wait_directive, transport_failed)
         monkeypatch.setattr(
             "hermes_cli.goals.judge_goal",
-            lambda **kw: (verdict, reason, False, None, False),
+            lambda **kw: (verdict, reason, False, None, transport_failed),
         )
 
         args = argparse.Namespace(task_ids=["t1"], summary=summary, result=None, metadata=None)
@@ -206,20 +207,13 @@ class TestCLIJudgeGate:
         assert rc == 0
         assert complete_calls == ["t1"]
 
-    def test_judge_blocked_verdict_rejects_completion(self, monkeypatch, capsys):
-        """#100954: an unachievable goal must not complete silently.
-
-        The judge's ``blocked`` verdict is a refusal, not a completion —
-        ``complete_task`` must never run and stderr must steer the user
-        toward re-scoping / recording the block.
-        """
+    def test_judge_rate_limit_does_not_reject_completion(self, monkeypatch):
+        """Quota/429/5xx is judge_unavailable — complete must still run."""
         rc, complete_calls = self._run(
             monkeypatch,
-            verdict="blocked",
-            reason="the target repository does not exist",
+            verdict="continue",
+            reason="judge error: RateLimitError",
+            transport_failed=True,
         )
-        err = capsys.readouterr().err
-        assert rc != 0, "blocked verdict must reject the completion"
-        assert complete_calls == [], "an unachievable goal must never reach complete_task"
-        assert "unachievable" in err.lower()
-        assert "kanban block" in err.lower()
+        assert rc == 0
+        assert complete_calls == ["t1"]

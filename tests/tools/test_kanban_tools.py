@@ -215,6 +215,119 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
         conn2.close()
 
 
+def test_request_review_goal_mode_allows_when_judge_rate_limited(monkeypatch, tmp_path):
+    """RateLimitError/5xx from the goal judge must not livelock request_review.
+
+    Regression for t_2c4f4a7b: judge_goal fail-opens as continue+transport_failed,
+    and the handoff gate treated that as a genuine not-done rejection.
+    """
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="goal-mode-review-rl", assignee="test-worker",
+            body="Must achieve X with verified evidence.", goal_mode=True,
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(claimed.current_run_id))
+
+    calls = {"n": 0}
+
+    def mock_judge_goal(*args, **kwargs):
+        calls["n"] += 1
+        class RateLimitError(Exception):
+            pass
+        # Mirror hermes_cli.goals.judge_goal's fail-open on call_llm errors:
+        # continue + transport_failed=True, reason carries the exception type.
+        return "continue", f"judge error: {RateLimitError.__name__}", False, None, True
+
+    monkeypatch.setattr("tools.kanban_tools.judge_goal", mock_judge_goal)
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+
+    out = kt._handle_request_review({"summary": "UI committed; ready for review."})
+    d = json.loads(out)
+    assert "error" not in d, d
+    assert d.get("ok") is True
+    assert d.get("status") == "review"
+    assert calls["n"] == 1, "judge must be consulted once, never retried in-gate"
+
+    conn2 = kb.connect()
+    try:
+        task = kb.get_task(conn2, tid)
+        assert task.status == "review"
+        run = kb.latest_run(conn2, tid)
+        assert run is not None
+        assert run.metadata is not None
+        assert run.metadata.get("judge_unavailable") is True
+    finally:
+        conn2.close()
+
+
+def test_complete_goal_mode_allows_when_judge_rate_limited(monkeypatch, tmp_path):
+    """Same contract on kanban_complete: quota/5xx is not 'work incomplete'."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="goal-mode-complete-rl", assignee="test-worker",
+            body="Must achieve X.", goal_mode=True,
+        )
+        kb.claim_task(conn, tid)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+
+    def mock_judge_goal(*args, **kwargs):
+        return "continue", "judge error: RateLimitError", False, None, True
+
+    monkeypatch.setattr("tools.kanban_tools.judge_goal", mock_judge_goal)
+    monkeypatch.setattr("tools.kanban_tools._goal_judge_available", lambda: True)
+
+    out = kt._handle_complete({"summary": "done with evidence"})
+    d = json.loads(out)
+    assert "error" not in d, d
+    assert d.get("ok") is True
+
+    conn2 = kb.connect()
+    try:
+        task = kb.get_task(conn2, tid)
+        assert task.status == "done"
+        run = kb.latest_run(conn2, tid)
+        assert run is not None
+        assert run.metadata is not None
+        assert run.metadata.get("judge_unavailable") is True
+    finally:
+        conn2.close()
+
+
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_block({"reason": "need clarification"})
