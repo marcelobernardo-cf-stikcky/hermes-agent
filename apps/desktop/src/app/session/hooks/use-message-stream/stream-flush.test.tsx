@@ -51,4 +51,62 @@ describe('stream delta delivery', () => {
     // for a frame that may never come.
     expect(rafSpy).toHaveBeenCalled()
   })
+
+  it('drops a scoped delta that arrives after message.complete instead of creating a duplicate final', async () => {
+    vi.useFakeTimers()
+    stream = renderMessageStream(SID)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    act(() => stream.handleEvent({ payload: {}, session_id: SID, type: 'message.start' }))
+    act(() => stream.handleEvent({ payload: { text: 'final answer' }, session_id: SID, type: 'message.complete' }))
+    act(() => stream.handleEvent({ payload: { text: 'final answer' }, session_id: SID, type: 'message.delta' }))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STREAM_DELTA_FLUSH_MS)
+    })
+
+    const finals = stream
+      .state()
+      .messages.filter(message =>
+        message.parts.some(part => part.type === 'text' && part.text === 'final answer')
+      )
+
+    expect(finals).toHaveLength(1)
+  })
+
+  it('accepts a first scoped delta when no completed turn is known', async () => {
+    vi.useFakeTimers()
+    stream = renderMessageStream(SID)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    act(() => stream.handleEvent({ payload: { text: 'recovered answer' }, session_id: SID, type: 'message.delta' }))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STREAM_DELTA_FLUSH_MS)
+    })
+
+    expect(stream.state().messages.at(-1)?.parts).toMatchObject([{ type: 'text', text: 'recovered answer' }])
+  })
+
+  it('treats an empty message.complete as terminal for later scoped deltas', async () => {
+    vi.useFakeTimers()
+    stream = renderMessageStream(SID)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    act(() => stream.handleEvent({ payload: {}, session_id: SID, type: 'message.start' }))
+    act(() => stream.handleEvent({ payload: { text: '' }, session_id: SID, type: 'message.complete' }))
+    act(() => stream.handleEvent({ payload: { text: 'late answer' }, session_id: SID, type: 'message.delta' }))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STREAM_DELTA_FLUSH_MS)
+    })
+
+    expect(stream.state().messages).toHaveLength(0)
+  })
 })
