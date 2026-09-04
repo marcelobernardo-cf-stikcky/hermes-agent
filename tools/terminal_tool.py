@@ -3452,13 +3452,23 @@ def terminal_tool(
                     from gateway.session_context import (
                         async_delivery_supported as _async_ok,
                         get_session_env as _gse,
+                        wake_delivery_supported as _wake_ok,
                     )
 
-                    # Finite sessions (stateless HTTP requests and one-shot
-                    # Kanban workers) cannot route a completion back to the
-                    # agent after the turn/process ends. Refuse the promise:
-                    # drop the flags and tell the agent to poll.
-                    if not _async_ok():
+                    # Two distinct capabilities: PUSH (send a message into an
+                    # already-open channel — _async_ok) and WAKE (resume the
+                    # session with a fresh turn later, e.g. api_server's
+                    # self-post through gateway/wake.py — _wake_ok). Only
+                    # refuse the promise when NEITHER is available — a
+                    # push=False/wake=True session (api_server) still gets a
+                    # real completion, just via a fresh turn instead of a
+                    # push into the closed one. Finite runtimes with no
+                    # gateway drain loop behind them at all (one-shot Kanban
+                    # workers, `hermes -z`, cron) are False on both and still
+                    # fall through to the refusal below.
+                    _has_push = _async_ok()
+                    _has_wake = _wake_ok()
+                    if not _has_push and not _has_wake:
                         notify_on_complete = False
                         watch_patterns = None
                         result_data["notify_on_complete"] = False

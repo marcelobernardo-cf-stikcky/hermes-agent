@@ -3091,6 +3091,23 @@ class BasePlatformAdapter(ABC):
     # set this to False to stay correct-by-default.
     supports_async_delivery: bool = True
 
+    # Whether this adapter can WAKE the real session with a fresh turn after
+    # the current one ends — distinct from ``supports_async_delivery`` (push a
+    # message to an already-open channel). A stateless request/response
+    # adapter has no open channel to push into, but can still resume its
+    # session by self-posting a new request through its own entry point (see
+    # ``gateway/wake.py::deliver_wake`` and ``adapter_supports_push`` — that
+    # helper name predates this flag and reads it under the ``push`` name for
+    # historical reasons; do not conflate the two names as unrelated).
+    # Default True: adapters that never opt out are assumed wake-capable
+    # exactly like they were previously assumed push-capable, preserving
+    # every existing adapter's behavior. Genuinely finite runtimes (one-shot
+    # Kanban workers, ``hermes -z``, cron) opt out at the SESSION level via
+    # ``gateway.session_context.declare_stateless_channel()`` /
+    # ``set_session_vars(wake_delivery=False)`` — not on the adapter class,
+    # because there is no adapter behind those runners at all.
+    supports_wake_delivery: bool = True
+
     # Whether this adapter's ``send()`` splits long content into multiple
     # messages via ``truncate_message()``.  When True, the delivery router
     # (gateway/delivery.py) skips gateway-level truncation and lets the

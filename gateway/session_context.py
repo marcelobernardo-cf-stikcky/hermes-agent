@@ -38,7 +38,7 @@ needs to replace the import + call site:
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
 # When a contextvar holds _UNSET, we fall back to os.environ (CLI/cron compat).
@@ -134,6 +134,24 @@ _CRON_SESSION: ContextVar = ContextVar("HERMES_CRON_SESSION", default=_UNSET)
 # setting ``supports_async_delivery = False`` on the adapter class; the gateway
 # propagates that into this contextvar at session-bind time.
 _SESSION_ASYNC_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
+
+# Whether the current session's channel can WAKE the real session with a
+# fresh turn after the current one ends — distinct from
+# ``_SESSION_ASYNC_DELIVERY`` (push a message into an already-open channel).
+#
+# A stateless request/response adapter (the API server) has no open channel
+# to push into (``_SESSION_ASYNC_DELIVERY`` is False there), but it CAN
+# resume its session by self-posting a new request through its own entry
+# point (see ``gateway/wake.py::deliver_wake``) — so it is push=False but
+# wake=True. Genuinely finite runtimes with no gateway drain loop at all
+# (one-shot Kanban workers, ``hermes -z``, cron) are both push=False and
+# wake=False; see ``declare_stateless_channel`` and
+# ``wake_delivery_supported``.
+#
+# Default _UNSET => treated as supported, mirroring
+# ``_SESSION_ASYNC_DELIVERY``'s default so CLI / contextvar-unaware paths
+# keep working.
+_SESSION_WAKE_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_WAKE_DELIVERY", default=_UNSET)
 
 # Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
 # don't clobber each other's delivery targets.
@@ -240,6 +258,7 @@ def set_session_vars(
     browser_control_transport_family: str = "",
     cwd: str = "",
     async_delivery: bool = True,
+    wake_delivery: Optional[bool] = None,
     ui_session_id: str = "",
     cron_session: Any = _UNSET,
 ) -> list:
@@ -258,10 +277,24 @@ def set_session_vars(
     ``_SESSION_ASYNC_DELIVERY`` / ``async_delivery_supported``). Stateless
     request/response adapters (the API server) pass ``False``.
 
+    ``wake_delivery`` declares whether this session's channel can WAKE the
+    real session with a fresh turn after the current one ends (see
+    ``_SESSION_WAKE_DELIVERY`` / ``wake_delivery_supported``) — distinct from
+    ``async_delivery``. Defaults to ``None``, which MIRRORS ``async_delivery``
+    (preserving every existing caller's behavior — cron, the CLI one-shot
+    path, and any caller that predates this split all still get
+    push==wake). A caller with a genuine push/wake split — currently only the
+    API server, which self-posts through its own entry point (see
+    ``gateway/wake.py``) — passes ``wake_delivery=True`` explicitly alongside
+    ``async_delivery=False``.
+
     ``cron_session`` is tri-state: ``_UNSET`` preserves legacy
     ``os.environ["HERMES_CRON_SESSION"]`` fallback, ``"1"`` marks a cron job,
     and ``""`` explicitly marks a non-cron session while masking leaked env.
     """
+    if wake_delivery is None:
+        wake_delivery = async_delivery
+
     # Mark the session-context machinery engaged for this process. The
     # subprocess-env bridge uses this to switch from "os.environ fallback" to
     # "ContextVar-authoritative, strip on _UNSET" — see session_context_engaged.
@@ -287,6 +320,7 @@ def set_session_vars(
         _BROWSER_CONTROL_TRANSPORT_FAMILY.set(browser_control_transport_family),
         _CRON_SESSION.set(cron_session),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
+        _SESSION_WAKE_DELIVERY.set(bool(wake_delivery)),
     ]
     try:
         from agent.runtime_cwd import set_session_cwd
@@ -334,6 +368,8 @@ def clear_session_vars(tokens: list) -> None:
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
     # stateless adapter.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    # Same reasoning for wake-delivery capability — see _SESSION_WAKE_DELIVERY.
+    _SESSION_WAKE_DELIVERY.set(_UNSET)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -375,6 +411,8 @@ def reset_session_vars() -> None:
     inherits that ``False`` through the pre-bind window, and
     ``async_delivery_supported`` wrongly reports the new turn's channel as
     unable to route a background completion until ``set_session_vars`` runs.
+    ``_SESSION_WAKE_DELIVERY`` has the identical leak concern and is reset the
+    same way.
     """
     for var in _VAR_MAP.values():
         var.set(_UNSET)
@@ -382,6 +420,7 @@ def reset_session_vars() -> None:
     # same inheritance-leak reason as the mapped vars above — see clear_session_vars,
     # which resets this var on the handler-exit path for the symmetric concern.
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
+    _SESSION_WAKE_DELIVERY.set(_UNSET)
     try:
         from agent.runtime_cwd import clear_session_cwd
 
@@ -471,17 +510,23 @@ def session_is_messaging_surface() -> bool:
 def declare_stateless_channel() -> None:
     """Declare that this session cannot receive an async background completion.
 
-    Binds only the delivery capability, leaving every other session var unset.
-    Use this instead of ``set_session_vars(async_delivery=False)`` on a pure
-    single-process runner: ``set_session_vars`` also latches
+    Binds both delivery capabilities (push AND wake) to False, leaving every
+    other session var unset. Use this instead of ``set_session_vars(async_delivery=False)``
+    on a pure single-process runner: ``set_session_vars`` also latches
     ``_session_context_engaged`` (see above), which switches the subprocess
     env bridge from "os.environ fallback" to "ContextVar-authoritative, strip on
     _UNSET" in ``tools/environments/local.py``. A one-shot CLI that never engages
     the session-context system must not flip that latch as a side effect of
     declaring a capability.
 
+    This is for runners with NO gateway drain loop behind them at all — a
+    finished process has nothing to self-post through, unlike the api_server
+    adapter (push=False, wake=True — see ``wake_delivery_supported``), so both
+    flags go False here.
+
     Callers that already build a full session context (cron's ``run_job``) get
-    the same state by passing ``async_delivery=False`` to ``set_session_vars``.
+    the same state by passing ``async_delivery=False, wake_delivery=False`` to
+    ``set_session_vars``.
 
     A session that cannot take a late completion makes ``delegate_task`` fall
     through to its existing inline/synchronous path, so subagent results are
@@ -491,6 +536,7 @@ def declare_stateless_channel() -> None:
     See NousResearch/hermes-agent#53027 and #63142.
     """
     _SESSION_ASYNC_DELIVERY.set(False)
+    _SESSION_WAKE_DELIVERY.set(False)
 
 
 def async_delivery_supported() -> bool:
@@ -520,6 +566,47 @@ def async_delivery_supported() -> bool:
         return False
 
     value = _SESSION_ASYNC_DELIVERY.get()
+    if value is _UNSET:
+        return True
+    return bool(value)
+
+
+def wake_delivery_supported() -> bool:
+    """Whether the current session's channel can WAKE the real session later.
+
+    Distinct from :func:`async_delivery_supported` (push): a stateless
+    request/response adapter such as the API server has no open channel to
+    push a message into, but it CAN resume its session by self-posting a new
+    request through its own entry point — ``gateway/wake.py::deliver_wake``
+    does exactly this for ``supports_wake_delivery=True`` adapters, using the
+    raw ``X-Hermes-Session-Id`` to land the wake turn back on the REAL
+    session a client is polling, not a synthetic parallel one.
+
+    Returns ``False`` for the same genuinely finite runtimes as
+    :func:`async_delivery_supported` — sessions explicitly bound by
+    :func:`declare_stateless_channel` (``hermes -z``, cron), and
+    dispatcher-spawned Kanban workers (``HERMES_KANBAN_TASK``) — because
+    those runners have no gateway drain loop behind them at all: there is
+    nothing to self-post through once the process exits. The API server is
+    NOT in this set; it opts into push=False but leaves wake=True (the
+    adapter default), so this returns ``True`` on that path even though
+    :func:`async_delivery_supported` returns ``False``.
+
+    Tools that promise async delivery (``terminal`` notify_on_complete /
+    watch_patterns) consult this ALONGSIDE :func:`async_delivery_supported`
+    before refusing the promise — refuse only when NEITHER capability is
+    available; a wake-capable channel can still surface the completion via a
+    fresh turn even though it cannot push into the current one.
+    """
+    import os
+
+    # Same one-shot-subprocess reasoning as async_delivery_supported: no
+    # gateway drain loop survives the process exit, so there is nothing to
+    # wake either.
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return False
+
+    value = _SESSION_WAKE_DELIVERY.get()
     if value is _UNSET:
         return True
     return bool(value)
