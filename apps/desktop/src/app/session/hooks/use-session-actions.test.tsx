@@ -1447,6 +1447,7 @@ describe('resumeSession failure recovery', () => {
             provider: '',
             reasoningEffort: '',
             sawAssistantPayload: false,
+            liveTurnId: null,
             serviceTier: '',
             storedSessionId: 'stored-1',
             streamId: null,
