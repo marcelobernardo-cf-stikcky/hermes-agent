@@ -96,11 +96,19 @@ export function useMessageStream({
     ) => {
       const apply = () => {
         updateSessionState(sessionId, state => {
-          // After a stop, drop any late deltas / tool events for the
-          // cancelled turn so they don't keep growing the (now finalized)
-          // assistant bubble or, worse, seed a brand-new bubble that
-          // appears to belong to the next user message.
-          if (state.interrupted) {
+          // After a stop or a completed turn, drop late deltas / tool events
+          // so they cannot grow the finalized bubble or seed a duplicate one.
+          // A first scoped delta is still accepted for reconnect recovery:
+          // sawAssistantPayload distinguishes that unknown state from a turn
+          // this renderer already observed reaching its terminal event.
+          const completedTurn =
+            state.sawAssistantPayload &&
+            !state.turnLive &&
+            !state.busy &&
+            !state.awaitingResponse &&
+            state.streamId === null
+
+          if (state.interrupted || completedTurn) {
             return state
           }
 
@@ -764,6 +772,7 @@ export function useMessageStream({
           busy: false,
           needsInput: false,
           interimBoundaryPending: false,
+          sawAssistantPayload: true,
           turnStartedAt: null,
           turnLive: false
         }
