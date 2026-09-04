@@ -571,7 +571,11 @@ export interface SessionMessage {
    * the full call from this field. Absent on a backend older than this app.
    */
   args?: unknown
+  /** SQLite activity flag from REST transcript rows. */
+  active?: number
   codex_reasoning_items?: unknown
+  /** SQLite compaction-retention flag from REST transcript rows. */
+  compacted?: number
   content: unknown
   /** Backend-projected user-visible content when a physical row also carries internal model scaffolding. */
   display_content?: unknown

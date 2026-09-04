@@ -14,6 +14,18 @@ import { capabilityScoped, getApiRequestConnection, hermesApi, type ProfileScope
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
+/**
+ * Transcript hydration is an active-view read. Compaction keeps archived rows
+ * on disk for recall, but those rows must not become Desktop bubbles. Keep
+ * rows from older backends that omit the activity metadata for compatibility;
+ * when the metadata is present, only the active generation is displayable.
+ */
+function activeTranscriptRows(messages: SessionMessage[]): SessionMessage[] {
+  const active = messages.filter(message => message.active === undefined || message.active === 1)
+
+  return active.length === messages.length ? messages : active
+}
+
 function sessionScoped(scope?: ProfileScope): { connectionId?: string; profile?: string } {
   if (scope === undefined || scope === null) {
     return {}
@@ -415,14 +427,16 @@ export function getSessionMessages(
 export const LATEST_SESSION_MESSAGES_LIMIT = 120
 
 export function getLatestSessionMessages(id: string, profile?: ProfileScope): Promise<SessionMessagesResponse> {
-  // includeCompacted: durable display history must include rows preserved by
-  // in-place compaction (active=0, compacted=1); without them the transcript
-  // silently ends at the compaction boundary and earlier turns are unreachable.
+  // The Desktop transcript is the active display view. Compacted rows remain
+  // durable for session_search, but must not be materialized as duplicate
+  // bubbles in the transcript.
   return getSessionMessages(id, profile, {
     limit: LATEST_SESSION_MESSAGES_LIMIT,
     order: 'latest',
-    includeCompacted: true
+    includeCompacted: false
   }).then(page => {
+    const activePage = { ...page, messages: activeTranscriptRows(page.messages) }
+
     // Record whether the tail was truncated (page came back full) and where
     // the next older page starts, so "Show earlier" can backfill over REST
     // (app/chat/transcript-backfill). Keyed under both the requested id and
@@ -433,7 +447,7 @@ export function getLatestSessionMessages(id: string, profile?: ProfileScope): Pr
       recordTranscriptTail(page.session_id, page, profile)
     }
 
-    return page
+    return activePage
   })
 }
 
@@ -493,7 +507,10 @@ export function getOlderSessionMessages(
   offset: number,
   limit: number = LATEST_SESSION_MESSAGES_LIMIT
 ): Promise<SessionMessagesResponse> {
-  return getSessionMessages(id, profile, { includeCompacted: true, limit, offset, order: 'latest' })
+  return getSessionMessages(id, profile, { includeCompacted: false, limit, offset, order: 'latest' }).then(page => ({
+    ...page,
+    messages: activeTranscriptRows(page.messages)
+  }))
 }
 
 export async function getAllSessionMessages(
