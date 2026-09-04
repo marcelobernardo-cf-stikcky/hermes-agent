@@ -208,3 +208,76 @@ def test_record_kanban_budget_exhausted_holds_real_card(kanban_home):
         assert kb.get_task(conn, tid).status == "blocked"
     finally:
         conn.close()
+
+
+def test_stale_worker_iteration_timeout_does_not_clobber_successor_run(
+    kanban_home, monkeypatch,
+):
+    """Ownership guard (#t_03c16b25): worker A claims run=1, is reclaimed,
+    worker B claims run=2. A is still alive and later exhausts its
+    iteration budget and calls the bridge with its own (stale)
+    ``HERMES_KANBAN_RUN_ID=1``. B's live run must be untouched: B stays
+    ``running``, keeps its ``worker_pid``, and no ``timed_out`` event is
+    recorded against B's run id.
+    """
+    import logging
+
+    from agent.turn_finalizer import _record_kanban_budget_exhausted
+
+    conn = kb.connect()
+    try:
+        tid = _claimed(conn)
+        task_after_a_claim = kb.get_task(conn, tid)
+        run_a = task_after_a_claim.current_run_id
+        assert run_a is not None
+
+        # A is reclaimed (operator or watchdog) — task goes back to ready.
+        assert kb.reclaim_task(conn, tid, reason="test reclaim") is True
+        assert kb.get_task(conn, tid).status == "ready"
+
+        # B claims the now-ready task — new run.
+        claimed_b = kb.claim_task(conn, tid)
+        assert claimed_b is not None
+        run_b = claimed_b.current_run_id
+        assert run_b is not None
+        assert run_b != run_a
+        kb._set_worker_pid(conn, tid, 900002)
+    finally:
+        conn.close()
+
+    # A is still alive and finally exhausts its iteration budget. Its
+    # own env would have HERMES_KANBAN_RUN_ID pinned to run_a from when
+    # the dispatcher spawned it.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(run_a))
+    _record_kanban_budget_exhausted(
+        tid, 90, 90, logging.getLogger("test.iteration_budget_hold.stale"),
+    )
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        # B's claim must be intact — untouched by A's stale mutation.
+        assert task.status == "running"
+        assert task.worker_pid == 900002
+        assert task.current_run_id == run_b
+        assert task.consecutive_failures == 0
+
+        # No timed_out event landed on B's run.
+        b_events = [
+            e for e in kb.list_events(conn, tid)
+            if e.run_id == run_b
+        ]
+        assert not any(e.kind == "timed_out" for e in b_events)
+
+        # A's stale attempt is observable as a diagnostic tied to its own
+        # (superseded) run id, not to B's.
+        superseded = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == "superseded_run"
+        ]
+        assert len(superseded) == 1
+        assert superseded[0].run_id == run_a
+        assert superseded[0].payload["actual_run_id"] == run_b
+    finally:
+        conn.close()

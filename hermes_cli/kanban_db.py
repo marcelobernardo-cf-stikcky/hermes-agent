@@ -9221,6 +9221,7 @@ def _record_task_failure(
     end_run: bool = False,
     hold: bool = False,
     event_payload_extra: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -9271,6 +9272,18 @@ def _record_task_failure(
     ``detect_crashed_workers``, which resolves the per-task
     ``max_retries`` override against the violation streak itself. The
     failure is still counted into ``consecutive_failures``.
+
+    ``expected_run_id`` is an optional ownership CAS: when set, the call
+    only mutates the task if ``tasks.current_run_id`` still equals
+    ``expected_run_id`` at the time this function reads the row (inside
+    the write transaction, so no other writer can interleave). A caller
+    whose run has already been superseded (reclaimed, crashed, or
+    re-claimed by a newer worker) gets a pure no-op: no status change, no
+    claim/pid clear, no counter increment, no run closed — only a
+    ``superseded_run`` diagnostic event tied to the caller's own
+    (superseded) run id, never the live successor's. Omitting the
+    argument (the default, ``None``) preserves the legacy behavior for
+    every existing caller.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -9281,6 +9294,34 @@ def _record_task_failure(
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
+            return False
+        if (
+            expected_run_id is not None
+            and row["current_run_id"] != expected_run_id
+        ):
+            # Ownership lost: some other writer (reclaim, a newer claim,
+            # a concurrent crash/timeout handler) already moved the task
+            # off the run this caller thinks it owns. Mutating now would
+            # clobber the successor's live claim/counters (#03c16b25).
+            # Record a diagnostic against the caller's own stale run id
+            # — never the successor's — and stop without touching
+            # status, claim, pid, or the failure counter.
+            _log.warning(
+                "kanban: refusing to record %s for task %s — caller's "
+                "run %s no longer owns the task (current run is %s)",
+                outcome, task_id, expected_run_id, row["current_run_id"],
+            )
+            _append_event(
+                conn, task_id, "superseded_run",
+                {
+                    "reason": "superseded_run",
+                    "trigger_outcome": outcome,
+                    "expected_run_id": expected_run_id,
+                    "actual_run_id": row["current_run_id"],
+                    "error": error[:500],
+                },
+                run_id=expected_run_id,
+            )
             return False
         retry_status = (
             _retry_status_for_run(conn, task_id, row["current_run_id"])
