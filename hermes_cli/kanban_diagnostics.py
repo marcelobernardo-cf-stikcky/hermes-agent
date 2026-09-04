@@ -955,6 +955,55 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     )]
 
 
+def _rule_unknown_skill(task, events, runs, now, cfg) -> list[Diagnostic]:
+    """A task requests a skill that is absent from its assignee profile.
+
+    This is deliberately resolved against the assignee's Hermes home rather
+    than the process/dispatcher home.  The dispatcher skips these tasks before
+    claiming them, so there is no run or retry failure to inspect here.
+    """
+    status = _task_field(task, "status")
+    if status in {"done", "archived"}:
+        return []
+    assignee = _task_field(task, "assignee")
+    skills = _task_field(task, "skills")
+    if isinstance(skills, str):
+        try:
+            skills = json.loads(skills)
+        except (TypeError, ValueError):
+            skills = []
+    if not isinstance(skills, (list, tuple)):
+        return []
+    try:
+        from hermes_cli.kanban_db import _unknown_profile_skills
+        missing = _unknown_profile_skills(assignee, skills)
+    except Exception:
+        return []
+    if not missing:
+        return []
+    return [Diagnostic(
+        kind="unknown_skill",
+        severity="error",
+        title="Requested skill is missing from the assignee profile",
+        detail=(
+            f"Assignee profile {assignee!r} does not contain the requested "
+            f"skill(s): {', '.join(missing)}. The dispatcher will not claim "
+            "this task or spend a retry until the skill is installed in that "
+            "profile."
+        ),
+        actions=[DiagnosticAction(
+            kind="cli_hint",
+            label="List skills for the assignee profile",
+            payload={"command": f"hermes -p {assignee} skills list"},
+            suggested=True,
+        )],
+        first_seen_at=int(_task_field(task, "created_at", 0) or 0),
+        last_seen_at=int(now),
+        count=1,
+        data={"assignee": assignee, "missing_skills": missing},
+    )]
+
+
 def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Task has been in ``ready`` status for too long without any worker
     claiming it.
@@ -1089,6 +1138,7 @@ _RULES: list[RuleFn] = [
     _rule_review_dependency_deadlock,
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
+    _rule_unknown_skill,
     _rule_stranded_in_ready,
 ]
 
@@ -1104,6 +1154,7 @@ DIAGNOSTIC_KINDS = (
     "review_dependency_deadlock",
     "stuck_in_blocked",
     "block_unblock_cycling",
+    "unknown_skill",
     "stranded_in_ready",
 )
 

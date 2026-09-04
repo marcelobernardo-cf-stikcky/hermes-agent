@@ -2813,6 +2813,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
+            "skipped_unknown_skill": [
+                {"task_id": tid, "skills": skills}
+                for tid, skills in res.skipped_unknown_skill
+            ],
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
                 for (tid, who, current) in res.skipped_per_profile_capped
@@ -2855,6 +2859,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    if res.skipped_unknown_skill:
+        for tid, skills in res.skipped_unknown_skill:
+            print(
+                f"Skipped (unknown skill in assignee profile): {tid} "
+                f"[{', '.join(skills)}]"
+            )
     return 0
 
 

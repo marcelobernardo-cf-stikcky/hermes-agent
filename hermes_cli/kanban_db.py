@@ -344,6 +344,7 @@ def _fire_dispatch_tick_hook(
             result.skipped_per_profile_capped,
             result.skipped_unassigned,
             result.skipped_nonspawnable,
+            result.skipped_unknown_skill,
         )):
             outcome = "idle"
         invoke_hook(
@@ -3166,6 +3167,55 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _unknown_profile_skills(
+    assignee: Optional[str],
+    skills: Optional[Iterable[str]],
+) -> Optional[list[str]]:
+    """Return explicitly requested skills missing from an assignee profile.
+
+    ``None`` means that *assignee* is not a Hermes profile and therefore cannot
+    be preflighted here (control-plane lanes are claimed by their own worker).
+    A list, including an empty list, means a real profile was checked.  Skill
+    resolution runs under a context-local ``HERMES_HOME`` override, so a
+    dispatcher serving the orchestrator profile never accidentally resolves or
+    copies its skills for the worker profile.
+    """
+    if not assignee or not skills:
+        return []
+
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+
+    profile_dir = get_profile_dir(assignee)
+    # A non-existent named assignee is an external/control-plane lane. Keep
+    # accepting it for manual claim; the dispatcher already has a separate
+    # nonspawnable bucket for that case. Do not treat the orchestrator's
+    # profile as a fallback source of skills.
+    if not profile_exists(assignee) or not profile_dir.is_dir():
+        return None
+
+    names = [str(name).strip() for name in skills if str(name).strip()]
+    if not names:
+        return []
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(profile_dir)
+    try:
+        from tools.skills_tool import skill_view
+
+        missing: list[str] = []
+        for name in names:
+            try:
+                payload = json.loads(skill_view(name, preprocess=False))
+            except Exception:
+                payload = {"success": False}
+            if not isinstance(payload, dict) or payload.get("success") is not True:
+                missing.append(name)
+        return missing
+    finally:
+        reset_hermes_home_override(token)
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -3403,6 +3453,14 @@ def create_task(
                 "capabilities (e.g. `web`, `browser`, `terminal`)."
             )
         skills_list = cleaned
+
+    unknown_skills = _unknown_profile_skills(assignee, skills_list)
+    if unknown_skills:
+        quoted = ", ".join(repr(name) for name in unknown_skills)
+        raise ValueError(
+            f"skill(s) {quoted} are not available in assignee profile "
+            f"{assignee!r}; install them in that profile before creating the task"
+        )
 
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
@@ -8073,6 +8131,11 @@ class DispatchResult:
     operator-actionable failure. Tracked separately so health telemetry
     can distinguish "real stuck" (nothing spawned but spawnable work
     available) from "correctly idle" (nothing spawnable in the queue)."""
+    skipped_unknown_skill: list[tuple[str, list[str]]] = field(default_factory=list)
+    """Tasks deferred because requested skills are absent from the assignee
+    profile. Each entry is ``(task_id, missing_skill_names)``; no claim/run or
+    failure count is created for this deterministic preflight failure.
+    """
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """Tasks deferred this tick because their assignee is already at
     ``kanban.max_in_progress_per_profile`` (#21582). Each entry is
@@ -10144,7 +10207,7 @@ def _dispatch_once_locked(
             spawn_budget = 1
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, skills FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -10153,7 +10216,7 @@ def _dispatch_once_locked(
     review_rows = []
     if review_dispatch_enabled():
         review_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
+            "SELECT id, assignee, skills FROM tasks "
             "WHERE status = 'review' AND claim_lock IS NULL "
             "ORDER BY priority DESC, created_at ASC"
         ).fetchall()
@@ -10290,6 +10353,16 @@ def _dispatch_once_locked(
             # multi-lane setups where the ready queue is steadily full
             # of human-pulled work.
             result.skipped_nonspawnable.append(row["id"])
+            continue
+        try:
+            requested_skills = json.loads(row["skills"] or "[]")
+        except (TypeError, ValueError):
+            requested_skills = []
+        if not isinstance(requested_skills, list):
+            requested_skills = []
+        missing_skills = _unknown_profile_skills(row_assignee, requested_skills)
+        if missing_skills:
+            result.skipped_unknown_skill.append((row["id"], missing_skills))
             continue
         # Per-profile concurrency cap (#21582): even if there's global
         # headroom, refuse to spawn for an assignee that's already at
@@ -10438,6 +10511,17 @@ def _dispatch_once_locked(
             profile_exists = None  # type: ignore[assignment]
         if profile_exists is not None and not profile_exists(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
+            continue
+        try:
+            requested_skills = json.loads(row["skills"] or "[]")
+        except (TypeError, ValueError):
+            requested_skills = []
+        if not isinstance(requested_skills, list):
+            requested_skills = []
+        requested_skills = [*requested_skills, "sdlc-review"]
+        missing_skills = _unknown_profile_skills(row["assignee"], requested_skills)
+        if missing_skills:
+            result.skipped_unknown_skill.append((row["id"], missing_skills))
             continue
         if _per_profile_cap is not None:
             current = _per_profile_running.get(row["assignee"], 0)
