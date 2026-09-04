@@ -4453,9 +4453,10 @@ def _synthesize_ended_run(
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    worker/operator ``kanban_block`` call (#28712) or an iteration-budget
+    hold (t_c0923819).
 
-    A ``blocked`` status can come from two very different sources:
+    A ``blocked`` status can come from three very different sources:
 
     * **Worker- or operator-initiated** — a worker called
       ``kanban_block(reason="review-required: ...")`` (or somebody ran
@@ -4463,17 +4464,23 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       should stay blocked until an operator unblocks it.  The block tool
       emits a ``"blocked"`` event row in ``task_events``.
 
+    * **Iteration-budget hold** — the worker exhausted N/N iterations.
+      ``_record_task_failure(..., hold=True)`` parks the card in
+      ``blocked`` with a ``timed_out`` event whose ``retry_status`` is
+      ``blocked``.  The dispatcher must not respawn it; the orchestrator
+      owns the next move.
+
     * **Circuit-breaker** — ``_record_task_failure`` tripped after
       repeated crashes / spawn failures / timeouts.  This emits
       ``"gave_up"``, *not* ``"blocked"``, and is meant to recover
       automatically once the underlying conditions change (e.g. parents
       finish, transient infra error clears).
 
-    The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
+    The cheapest signal that distinguishes sticky vs auto-recover is the
+    most recent ``"blocked"`` / ``"unblocked"`` / hold-``timed_out``
+    event.  A later ``unblocked`` clears both worker blocks and budget
+    holds.  A wall-clock ``timed_out`` (``retry_status=ready``) is not
+    sticky — those still retry on the same rung.
 
     Returns ``False`` when there is no such event at all (e.g. the task
     was set to ``status='blocked'`` by the circuit breaker or by direct
@@ -4481,12 +4488,22 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     for that path.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked', 'timed_out') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row:
+        return False
+    if row["kind"] == "blocked":
+        return True
+    if row["kind"] != "timed_out":
+        return False
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    return isinstance(payload, dict) and payload.get("retry_status") == "blocked"
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
@@ -8534,6 +8551,7 @@ def enforce_max_runtime(
                     "limit_seconds": int(row["max_runtime_seconds"]),
                     "sigkill": killed,
                     "retry_status": retry_status,
+                    "timeout_reason": "wall_clock",
                 }
                 run_id = _end_run(
                     conn, tid,
@@ -9201,6 +9219,7 @@ def _record_task_failure(
     force_trip: bool = False,
     release_claim: bool = False,
     end_run: bool = False,
+    hold: bool = False,
     event_payload_extra: Optional[dict] = None,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
@@ -9227,9 +9246,16 @@ def _record_task_failure(
       counter; if the breaker trips, the task is re-transitioned
       into ``blocked`` and a ``gave_up`` event is emitted.
 
-    ``event_payload_extra`` merges into the ``gave_up`` event payload
-    when the breaker trips, so callers can include outcome-specific
-    context (e.g. pid on crash, elapsed on timeout).
+    ``hold=True`` parks the card in ``blocked`` even below the breaker
+    threshold (iteration-budget / loop exhaustion). Crash and spawn
+    failures omit it so they still retry on the same rung. The
+    ``timed_out`` (or ``gave_up``) event carries ``retry_status=blocked``
+    so ``recompute_ready`` will not auto-respawn.
+
+    ``event_payload_extra`` merges into the outcome event (and into
+    ``gave_up`` when the breaker trips), so callers can include
+    outcome-specific context (e.g. pid on crash, elapsed on timeout,
+    ``timeout_reason``).
 
     Resolution order for the effective threshold:
       1. per-task ``max_retries`` if set (nothing else overrides)
@@ -9261,6 +9287,8 @@ def _record_task_failure(
             if release_claim
             else ("review" if row["status"] == "review" else "ready")
         )
+        if hold:
+            retry_status = "blocked"
         failures = int(row["consecutive_failures"]) + 1
 
         # Per-task override wins over both caller-supplied and default
@@ -9345,23 +9373,22 @@ def _record_task_failure(
                 )
             if end_run:
                 # Spawn path: close the open run with outcome.
+                event_payload = {
+                    "error": error[:500],
+                    "failures": failures,
+                    "retry_status": retry_status,
+                }
+                if event_payload_extra:
+                    event_payload.update(event_payload_extra)
+                    event_payload["retry_status"] = retry_status
                 run_id = _end_run(
                     conn, task_id,
                     outcome=outcome, status=outcome,
                     error=error[:500],
-                    metadata={
-                        "failures": failures,
-                        "retry_status": retry_status,
-                    },
+                    metadata=event_payload,
                 )
                 _append_event(
-                    conn, task_id, outcome,
-                    {
-                        "error": error[:500],
-                        "failures": failures,
-                        "retry_status": retry_status,
-                    },
-                    run_id=run_id,
+                    conn, task_id, outcome, event_payload, run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
     return blocked
