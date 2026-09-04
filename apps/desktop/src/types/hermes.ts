@@ -584,6 +584,10 @@ export interface MessageReaction {
 }
 
 export interface SessionMessage {
+  /** SQLite activity flag from REST transcript rows. */
+  active?: number
+  /** SQLite compaction-retention flag from REST transcript rows. */
+  compacted?: number
   /**
    * Full tool arguments for a gateway-projected tool row (`role: 'tool'`).
    * `context` is an 80-char display preview. The expanded tool row rebuilds

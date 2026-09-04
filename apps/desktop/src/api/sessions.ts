@@ -14,6 +14,18 @@ import { capabilityScoped, getApiRequestConnection, hermesApi, type ProfileScope
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
+/**
+ * The transcript read model is the live view, not the compaction audit trail.
+ * Backends normally enforce this through include_compacted=false, but retain
+ * this boundary guard for older or skewed backends that return retained rows
+ * anyway. Missing flags remain compatible with legacy response shapes.
+ */
+function activeTranscriptRows(messages: SessionMessage[]): SessionMessage[] {
+  const active = messages.filter(message => message.active !== 0 && message.compacted !== 1)
+
+  return active.length === messages.length ? messages : active
+}
+
 function sessionScoped(scope?: ProfileScope): { connectionId?: string; profile?: string } {
   if (scope === undefined || scope === null) {
     return {}
@@ -440,25 +452,27 @@ export function getSessionMessages(
 export const LATEST_SESSION_MESSAGES_LIMIT = 120
 
 export function getLatestSessionMessages(id: string, profile?: ProfileScope): Promise<SessionMessagesResponse> {
-  // includeCompacted: durable display history must include rows preserved by
-  // in-place compaction (active=0, compacted=1); without them the transcript
-  // silently ends at the compaction boundary and earlier turns are unreachable.
+  // The Desktop transcript is the active display view. Compacted rows remain
+  // durable for session_search, but must not be materialized as duplicate
+  // bubbles in the transcript.
   return getSessionMessages(id, profile, {
     limit: LATEST_SESSION_MESSAGES_LIMIT,
     order: 'latest',
-    includeCompacted: true
+    includeCompacted: false
   }).then(page => {
+    const activePage = { ...page, messages: activeTranscriptRows(page.messages) }
+
     // Record whether the tail was truncated (page came back full) and where
     // the next older page starts, so "Show earlier" can backfill over REST
     // (app/chat/transcript-backfill). Keyed under both the requested id and
     // the resolved id — callers hold either.
-    recordTranscriptTail(id, page, profile)
+    recordTranscriptTail(id, activePage, profile)
 
-    if (page.session_id && page.session_id !== id) {
-      recordTranscriptTail(page.session_id, page, profile)
+    if (activePage.session_id && activePage.session_id !== id) {
+      recordTranscriptTail(activePage.session_id, activePage, profile)
     }
 
-    return page
+    return activePage
   })
 }
 
@@ -518,7 +532,10 @@ export function getOlderSessionMessages(
   offset: number,
   limit: number = LATEST_SESSION_MESSAGES_LIMIT
 ): Promise<SessionMessagesResponse> {
-  return getSessionMessages(id, profile, { includeCompacted: true, limit, offset, order: 'latest' })
+  return getSessionMessages(id, profile, { includeCompacted: false, limit, offset, order: 'latest' }).then(page => ({
+    ...page,
+    messages: activeTranscriptRows(page.messages)
+  }))
 }
 
 export async function getAllSessionMessages(
@@ -538,11 +555,12 @@ export async function getAllSessionMessages(
       limit: pageSize,
       offset,
       order: 'oldest',
-      includeCompacted: true
+      includeCompacted: false
     })
 
     resolvedSessionId = page.session_id
-    jsonChars += (JSON.stringify(page.messages) ?? '').length
+    const activePage = activeTranscriptRows(page.messages)
+    jsonChars += (JSON.stringify(activePage) ?? '').length
 
     if (jsonChars > maxJsonChars) {
       throw new Error(
@@ -550,7 +568,7 @@ export async function getAllSessionMessages(
       )
     }
 
-    messages.push(...page.messages)
+    messages.push(...activePage)
 
     // Legacy backends ignore pagination and return the full transcript.
     if (!page.pagination || page.messages.length === 0 || page.messages.length < page.pagination.limit) {

@@ -543,7 +543,7 @@ describe('Hermes REST helpers', () => {
     })
   })
 
-  it('hydrates the latest transcript with a small tail page (120, latest, compacted rows included)', async () => {
+  it('hydrates the latest transcript with a small active-only tail page', async () => {
     api.mockResolvedValue({
       messages: [],
       pagination: { limit: 120, offset: 0, order: 'latest', returned: 0 },
@@ -554,9 +554,25 @@ describe('Hermes REST helpers', () => {
 
     expect(LATEST_SESSION_MESSAGES_LIMIT).toBe(120)
     expect(api).toHaveBeenCalledWith({
-      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=120&order=latest&include_compacted=true',
+      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=120&order=latest&include_compacted=false',
       profile: 'xiaoxuxu'
     })
+  })
+
+  it('does not expose inactive or compacted replacement rows in the transcript read model', async () => {
+    api.mockResolvedValue({
+      messages: [
+        { active: 1, compacted: 0, content: 'live question', id: 1, role: 'user', timestamp: 1 },
+        { active: 0, compacted: 1, content: 'historical replacement', id: 2, role: 'user', timestamp: 2 },
+        { active: 1, compacted: 0, content: 'live answer', id: 3, role: 'assistant', timestamp: 3 }
+      ],
+      pagination: { limit: 120, offset: 0, order: 'latest', returned: 3 },
+      session_id: 'session-1'
+    })
+
+    const page = await getLatestSessionMessages('session-1')
+
+    expect(page.messages.map(message => message.content)).toEqual(['live question', 'live answer'])
   })
 
   it('records tail truncation state under the requested and resolved session ids', async () => {
@@ -579,7 +595,7 @@ describe('Hermes REST helpers', () => {
     await getOlderSessionMessages('session-1', 'xiaoxuxu', 240)
 
     expect(api).toHaveBeenCalledWith({
-      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=120&offset=240&order=latest&include_compacted=true',
+      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=120&offset=240&order=latest&include_compacted=false',
       profile: 'xiaoxuxu'
     })
   })
@@ -616,11 +632,11 @@ describe('Hermes REST helpers', () => {
 
     expect(result.messages).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }])
     expect(api).toHaveBeenNthCalledWith(1, {
-      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=500&offset=0&order=oldest&include_compacted=true',
+      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=500&offset=0&order=oldest&include_compacted=false',
       profile: 'xiaoxuxu'
     })
     expect(api).toHaveBeenNthCalledWith(2, {
-      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=500&offset=2&order=oldest&include_compacted=true',
+      path: '/api/sessions/session-1/messages?profile=xiaoxuxu&limit=500&offset=2&order=oldest&include_compacted=false',
       profile: 'xiaoxuxu'
     })
   })
