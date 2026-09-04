@@ -64,7 +64,8 @@ def _patch_gateway_discovery():
          patch("hermes_cli.update_inventory.report_unaccounted_runtimes", return_value=False), \
          patch.object(hermes_main, "_fleet_probe_expected_runtimes", lambda *a, **kw: False), \
          patch.object(hermes_main, "_purge_stale_hermes_modules", lambda *a, **kw: None), \
-         patch("hermes_cli.update_receipt.collect_fleet_versions", return_value=[]):
+         patch("hermes_cli.update_receipt.collect_fleet_versions", return_value=[]), \
+         patch("hermes_cli.gateway_windows.is_installed", return_value=False):
         yield
 
 
