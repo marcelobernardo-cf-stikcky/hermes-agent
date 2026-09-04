@@ -1500,9 +1500,18 @@ class APIServerAdapter(BasePlatformAdapter):
     # outbound channel to push a background completion to a client that already
     # received its response, and ``send()`` is a no-op stub. So async-delivery
     # tools (terminal notify_on_complete / watch_patterns, delegate_task
-    # background=True) must NOT promise delivery on this path — see
+    # background=True) must NOT promise a PUSH delivery on this path — see
     # ``async_delivery_supported()``.
     supports_async_delivery: bool = False
+
+    # But the api_server CAN wake the real session: ``gateway/wake.py``
+    # self-POSTs ``/v1/chat/completions`` with the raw ``X-Hermes-Session-Id``
+    # header, resuming the exact session a client is polling — no persistent
+    # channel required. Explicit True (matches the base default) documents
+    # the split deliberately: this adapter is push=False/wake=True, not
+    # blanket-stateless. See ``gateway.session_context.wake_delivery_supported``
+    # and ``tools/terminal_tool.py`` (notify_on_complete/watch_patterns gate).
+    supports_wake_delivery: bool = True
 
     # Same statelessness applies to the startup auto-resume prompt: no client
     # is waiting to answer "session restored — what next?", so a resumed turn
@@ -7362,7 +7371,13 @@ class APIServerAdapter(BasePlatformAdapter):
         physically cannot reintroduce the silent-no-op bug (#10760) by
         forgetting to mark the channel as non-delivering. There is no
         ``async_delivery`` parameter to get wrong; the stateless HTTP path can
-        never wake the agent after the turn ends, on ANY route.
+        never PUSH into an already-open channel, on ANY route.
+
+        ``wake_delivery`` is left at its default (True): unlike push, the
+        api_server CAN resume its session with a fresh turn via
+        ``gateway/wake.py``'s self-post — see
+        ``APIServerAdapter.supports_wake_delivery`` and
+        ``gateway.session_context.wake_delivery_supported``.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
         ``finally`` block (the binding is request-scoped and must not outlive
@@ -7379,6 +7394,7 @@ class APIServerAdapter(BasePlatformAdapter):
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
             async_delivery=False,
+            wake_delivery=True,
             cron_session="",
         )
 
