@@ -2186,8 +2186,10 @@ class PluginContext:
     ) -> Optional[PluginRegistration]:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
-        The handler signature is ``fn(raw_args: str) -> str | None``.
-        It may also be an async callable — the gateway dispatch handles both.
+        The handler signature is ``fn(raw_args: str) -> str | None``. Commands
+        that should start an agent turn may instead return a validated
+        ``{"type": "send", "message": "..."}`` dispatch. It may also be an
+        async callable — the gateway dispatch handles both.
 
         Unlike ``register_cli_command()`` (which creates ``hermes <subcommand>``
         terminal commands), this registers in-session slash commands that users
@@ -7095,6 +7097,20 @@ def resolve_plugin_command_result(result: Any) -> Any:
     if "exc" in failure:
         raise failure["exc"]
     return outcome.get("value")
+
+
+def normalize_plugin_send_dispatch(result: Any) -> Optional[Dict[str, str]]:
+    """Return a validated agent-send directive from a plugin result."""
+    if not isinstance(result, dict) or result.get("type") != "send":
+        return None
+    message = result.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return None
+    return {
+        key: result[key]
+        for key in ("type", "message", "notice", "display")
+        if key in result and (key == "type" or isinstance(result[key], str))
+    }
 
 
 def get_plugin_commands() -> Dict[str, dict]:

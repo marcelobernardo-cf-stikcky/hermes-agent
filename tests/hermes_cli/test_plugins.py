@@ -47,6 +47,30 @@ def test_portable_skill_namespace_is_ascii_safe():
     assert is_valid_namespace(namespace)
 
 
+def test_normalize_plugin_send_dispatch_validates_and_filters_payload():
+    from hermes_cli import plugins as plugins_mod
+
+    assert plugins_mod.normalize_plugin_send_dispatch(
+        {
+            "type": "send",
+            "message": "audit repo",
+            "display": "/agent-prompt repo",
+            "notice": 42,
+            "ignored": "not part of the contract",
+        }
+    ) == {
+        "type": "send",
+        "message": "audit repo",
+        "display": "/agent-prompt repo",
+    }
+    assert plugins_mod.normalize_plugin_send_dispatch(
+        {"type": "send", "message": "   "}
+    ) is None
+    assert plugins_mod.normalize_plugin_send_dispatch(
+        {"type": "plugin", "message": "audit repo"}
+    ) is None
+
+
 def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
                      manifest_extra: dict | None = None,
                      auto_enable: bool = True,

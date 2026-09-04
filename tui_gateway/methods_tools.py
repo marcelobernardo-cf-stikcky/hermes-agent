@@ -517,17 +517,29 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
 
     try:
-        from hermes_cli.plugins import (
-            get_plugin_command_handler,
-            resolve_plugin_command_result,
-        )
+        from hermes_cli.plugins import get_plugin_command_handler
 
         handler = get_plugin_command_handler(name)
-        if handler:
-            result = resolve_plugin_command_result(handler(arg))
-            return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
-        pass
+        handler = None
+
+    if handler:
+        try:
+            from hermes_cli.plugins import (
+                normalize_plugin_send_dispatch,
+                resolve_plugin_command_result,
+            )
+
+            result = resolve_plugin_command_result(handler(arg))
+            dispatch = normalize_plugin_send_dispatch(result)
+            if dispatch:
+                return _ok(rid, dispatch)
+            return _ok(rid, {"type": "plugin", "output": str(result or "")})
+        except Exception as exc:
+            return _ok(
+                rid,
+                {"type": "plugin", "output": f"Plugin command error: {exc}"},
+            )
 
     try:
         from agent.skill_bundles import (
@@ -1258,25 +1270,23 @@ def _(rid, params: dict) -> dict:
         pass
 
     plugin_handler = None
-    resolve_plugin_command_result = None
     if _cmd_base:
         try:
-            from hermes_cli.plugins import (
-                get_plugin_command_handler,
-                resolve_plugin_command_result,
-            )
+            from hermes_cli.plugins import get_plugin_command_handler
 
             plugin_handler = get_plugin_command_handler(_cmd_base)
         except Exception:
             plugin_handler = None
-            resolve_plugin_command_result = None
 
-    if plugin_handler and resolve_plugin_command_result:
-        try:
-            result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
-            return _ok(rid, {"output": str(result or "(no output)")})
-        except Exception as e:
-            return _ok(rid, {"output": f"Plugin command error: {e}"})
+    if plugin_handler:
+        return _methods["command.dispatch"](
+            rid,
+            {
+                "name": _cmd_base,
+                "arg": _cmd_arg,
+                "session_id": params.get("session_id", ""),
+            },
+        )
 
     worker = session.get("slash_worker")
     if not worker:

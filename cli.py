@@ -13111,6 +13111,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
                 from hermes_cli.plugins import (
                     get_plugin_command_handler,
+                    normalize_plugin_send_dispatch,
                     resolve_plugin_command_result,
                 )
                 plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
@@ -13120,7 +13121,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         result = resolve_plugin_command_result(
                             plugin_handler(user_args)
                         )
-                        if result:
+                        dispatch = normalize_plugin_send_dispatch(result)
+                        if dispatch and hasattr(self, "_pending_input"):
+                            self._pending_input.put(dispatch["message"])
+                        elif result:
                             _cprint(str(result))
                     except Exception as e:
                         _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")

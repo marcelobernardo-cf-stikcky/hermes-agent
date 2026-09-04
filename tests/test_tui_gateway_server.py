@@ -11338,6 +11338,68 @@ def test_commands_catalog_includes_plugin_commands(monkeypatch):
     assert "/lcm" in dict(plugin_cat["pairs"])
 
 
+def test_slash_exec_preserves_plugin_send_directive(monkeypatch):
+    def get_handler(name):
+        if name != "agent-prompt":
+            return None
+
+        return lambda arg: {
+            "type": "send",
+            "message": f"audit {arg}",
+            "display": f"/{name} {arg}",
+            "notice": 42,
+            "ignored": "not part of the dispatch contract",
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_plugin_command_handler",
+        get_handler,
+    )
+    server._sessions["sid"] = _session()
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"command": "agent-prompt repo", "session_id": "sid"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"] == {
+        "type": "send",
+        "message": "audit repo",
+        "display": "/agent-prompt repo",
+    }
+
+
+def test_slash_exec_preserves_plugin_error(monkeypatch):
+    def fail(_arg):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_plugin_command_handler",
+        lambda name: fail if name == "broken-plugin" else None,
+    )
+    server._sessions["sid"] = _session()
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"command": "broken-plugin", "session_id": "sid"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"] == {
+        "type": "plugin",
+        "output": "Plugin command error: boom",
+    }
+
+
 def test_session_status_reads_live_gateway_agent(monkeypatch):
     agent = types.SimpleNamespace(
         model="live-model",

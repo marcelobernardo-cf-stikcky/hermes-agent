@@ -225,3 +225,30 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_send_starts_agent_turn(monkeypatch):
+    import gateway.run as gateway_run
+    from hermes_cli import plugins as plugins_mod
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        return_value={"final_response": "done", "messages": [], "api_calls": 0}
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: (
+            lambda arg: {"type": "send", "message": f"audit {arg}"}
+        )
+        if name == "agent-prompt"
+        else None,
+    )
+
+    await runner._handle_message(_make_event("/agent-prompt repo"))
+
+    assert runner._run_agent.await_args.kwargs["message"] == "audit repo"

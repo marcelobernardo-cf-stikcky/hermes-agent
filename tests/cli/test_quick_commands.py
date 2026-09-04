@@ -69,6 +69,29 @@ class TestCLIQuickCommands:
         printed = self._printed_plain(cli.console.print.call_args[0][0])
         assert printed == "overridden"
 
+    def test_plugin_send_queues_agent_prompt(self):
+        import queue
+
+        cli = self._make_cli({})
+        cli._pending_input = queue.Queue()
+
+        with (
+            patch("cli._ensure_skill_commands", return_value={}),
+            patch("cli.get_skill_bundles", return_value={}),
+            patch("cli._get_plugin_cmd_handler_names", return_value={"agent-prompt"}),
+            patch(
+                "hermes_cli.plugins.get_plugin_command_handler",
+                return_value=lambda arg: {
+                    "type": "send",
+                    "message": f"audit {arg}",
+                    "display": f"/agent-prompt {arg}",
+                },
+            ),
+        ):
+            assert cli.process_command("/agent-prompt repo") is True
+
+        assert cli._pending_input.get_nowait() == "audit repo"
+
 
 
 
