@@ -192,7 +192,12 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
         outcome="timed_out",
         release_claim=True,
         end_run=True,
-        event_payload_extra={"budget_used": 60, "budget_max": 60},
+        hold=True,
+        event_payload_extra={
+            "budget_used": 60,
+            "budget_max": 60,
+            "timeout_reason": "iteration_budget",
+        },
     )
 
 
@@ -273,8 +278,10 @@ def test_bounded_fallback_records_kanban_failure_when_interrupted(monkeypatch):
     assert kwargs["outcome"] == "timed_out"
     assert kwargs["release_claim"] is True
     assert kwargs["end_run"] is True
+    assert kwargs["hold"] is True
     assert kwargs["event_payload_extra"]["budget_used"] == 60
     assert kwargs["event_payload_extra"]["budget_max"] == 60
+    assert kwargs["event_payload_extra"]["timeout_reason"] == "iteration_budget"
 
 
 def test_bounded_fallback_records_kanban_failure_when_failed(monkeypatch):

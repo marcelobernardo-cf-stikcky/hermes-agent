@@ -95,9 +95,11 @@ def _record_kanban_budget_exhausted(
                 outcome="timed_out",
                 release_claim=True,
                 end_run=True,
+                hold=True,
                 event_payload_extra={
                     "budget_used": api_call_count,
                     "budget_max": max_iterations,
+                    "timeout_reason": "iteration_budget",
                 },
             )
         finally:
