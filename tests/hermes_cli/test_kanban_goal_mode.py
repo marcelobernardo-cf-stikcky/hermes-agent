@@ -145,7 +145,8 @@ class TestCLIJudgeGate:
     """
 
     def _run(self, monkeypatch, *, goal_mode=True, judge_available=True,
-             verdict="done", reason="", complete_ok=True, summary="done"):
+             verdict="done", reason="", complete_ok=True, summary="done",
+             transport_failed=False):
         import argparse
         import types
         from unittest.mock import MagicMock
@@ -184,7 +185,7 @@ class TestCLIJudgeGate:
         # (verdict, reason, parse_failed, wait_directive, transport_failed)
         monkeypatch.setattr(
             "hermes_cli.goals.judge_goal",
-            lambda **kw: (verdict, reason, False, None, False),
+            lambda **kw: (verdict, reason, False, None, transport_failed),
         )
 
         args = argparse.Namespace(task_ids=["t1"], summary=summary, result=None, metadata=None)
@@ -203,5 +204,16 @@ class TestCLIJudgeGate:
     def test_non_goal_mode_task_skips_gate(self, monkeypatch):
         """Plain (non-goal_mode) tasks are never sent to the judge."""
         rc, complete_calls = self._run(monkeypatch, goal_mode=False)
+        assert rc == 0
+        assert complete_calls == ["t1"]
+
+    def test_judge_rate_limit_does_not_reject_completion(self, monkeypatch):
+        """Quota/429/5xx is judge_unavailable — complete must still run."""
+        rc, complete_calls = self._run(
+            monkeypatch,
+            verdict="continue",
+            reason="judge error: RateLimitError",
+            transport_failed=True,
+        )
         assert rc == 0
         assert complete_calls == ["t1"]

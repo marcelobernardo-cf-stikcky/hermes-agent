@@ -251,14 +251,25 @@ def _goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
-def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
-    """Return a rejection reason when a goal-mode terminal handoff is premature."""
+def _stamp_judge_unavailable(metadata: Optional[dict]) -> dict:
+    """Record that the goal judge could not evaluate this handoff."""
+    stamped = dict(metadata or {})
+    stamped["judge_unavailable"] = True
+    return stamped
+
+
+def _goal_mode_handoff_decision(task, evidence: str) -> tuple[Optional[str], bool]:
+    """Decide whether a goal-mode terminal handoff is premature.
+
+    Returns ``(rejection, judge_unavailable)``. ``rejection`` is set only
+    for a genuine not-done verdict. Quota/429/5xx/transport failure is
+    ``judge_unavailable``: the handoff must proceed, never livelock as
+    ``continue``.
+    """
     if not task or not task.goal_mode or not _goal_judge_available():
-        return None
-    verdict = "done"
-    reason = ""
+        return None, False
     try:
-        verdict, reason, _, _, _ = judge_goal(
+        verdict, reason, _, _, transport_failed = judge_goal(
             goal=f"{task.title}\n\n{task.body or ''}".strip(),
             last_response=evidence.strip(),
         )
@@ -270,7 +281,20 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
             judge_exc,
             exc_info=True,
         )
-    return reason if verdict != "done" else None
+        return None, True
+    if transport_failed:
+        logger.warning(
+            "goal judge unavailable (%s); allowing lifecycle handoff",
+            reason or "transport_failed",
+        )
+        return None, True
+    return (reason if verdict != "done" else None), False
+
+
+def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
+    """Return a rejection reason when a goal-mode terminal handoff is premature."""
+    rejection, _unavailable = _goal_mode_handoff_decision(task, evidence)
+    return rejection
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +776,7 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
-            rejection = _goal_mode_handoff_rejection(
+            rejection, judge_unavailable = _goal_mode_handoff_decision(
                 task,
                 (summary or result or "").strip(),
             )
@@ -764,6 +788,8 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"or (2) create continuation tasks with parents=[{tid}] "
                     f"and keep this task alive."
                 )
+            if judge_unavailable:
+                metadata = _stamp_judge_unavailable(metadata)
 
             try:
                 ok = kb.complete_task(
@@ -937,13 +963,15 @@ def _handle_request_review(args: dict, **kw) -> str:
         kb, conn = _connect(board=board)
         try:
             task = kb.get_task(conn, tid)
-            rejection = _goal_mode_handoff_rejection(task, summary)
+            rejection, judge_unavailable = _goal_mode_handoff_decision(task, summary)
             if rejection is not None:
                 return tool_error(
                     f"Goal review handoff rejected by judge: {rejection}. "
                     "Provide acceptance evidence matching the card before "
                     "requesting review."
                 )
+            if judge_unavailable:
+                metadata = _stamp_judge_unavailable(metadata)
             ok, fail_reason = kb.request_review(
                 conn, tid,
                 summary=summary,

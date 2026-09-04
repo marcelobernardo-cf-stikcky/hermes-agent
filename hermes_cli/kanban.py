@@ -2311,25 +2311,36 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return None
 
 
-def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str) -> Optional[str]:
-    """Apply the goal judge to every terminal worker handoff, including review."""
+def _stamp_judge_unavailable(metadata: Optional[dict]) -> dict:
+    """Record that the goal judge could not evaluate this handoff."""
+    stamped = dict(metadata or {})
+    stamped["judge_unavailable"] = True
+    return stamped
+
+
+def _goal_mode_handoff_decision(
+    task: Optional[kb.Task], evidence: str
+) -> tuple[Optional[str], bool]:
+    """Decide whether a goal-mode terminal handoff is premature.
+
+    Returns ``(rejection, judge_unavailable)``. Quota/429/5xx/transport
+    failure is ``judge_unavailable`` — the handoff must proceed.
+    """
     if task is None or not task.goal_mode:
-        return None
+        return None, False
     try:
         from agent.auxiliary_client import get_text_auxiliary_client
 
         client, model = get_text_auxiliary_client("goal_judge")
     except Exception:
-        return None
+        return None, False
     if client is None or not model:
-        return None
+        return None, False
 
     from hermes_cli.goals import judge_goal
 
-    verdict = "done"
-    reason = ""
     try:
-        verdict, reason, _, _, _ = judge_goal(
+        verdict, reason, _, _, transport_failed = judge_goal(
             goal=f"{task.title}\n\n{task.body or ''}".strip(),
             last_response=evidence.strip(),
         )
@@ -2341,7 +2352,22 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str) -> Opti
             judge_exc,
             exc_info=True,
         )
-    return reason if verdict != "done" else None
+        return None, True
+    if transport_failed:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "goal judge unavailable (%s); allowing lifecycle handoff",
+            reason or "transport_failed",
+        )
+        return None, True
+    return (reason if verdict != "done" else None), False
+
+
+def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str) -> Optional[str]:
+    """Apply the goal judge to every terminal worker handoff, including review."""
+    rejection, _unavailable = _goal_mode_handoff_decision(task, evidence)
+    return rejection
 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
@@ -2379,7 +2405,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             # to every terminal handoff so request-review cannot bypass the
             # acceptance contract that protects complete.
             task = kb.get_task(conn, tid)
-            rejection = _goal_mode_handoff_rejection(
+            rejection, judge_unavailable = _goal_mode_handoff_decision(
                 task,
                 (summary or args.result or "").strip(),
             )
@@ -2391,12 +2417,15 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 )
                 failed.append(tid)
                 continue
+            task_metadata = (
+                _stamp_judge_unavailable(metadata) if judge_unavailable else metadata
+            )
 
             if not kb.complete_task(
                 conn, tid,
                 result=args.result,
                 summary=summary,
-                metadata=metadata,
+                metadata=task_metadata,
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
@@ -2532,7 +2561,7 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
             return 2
     reviewer = getattr(args, "reviewer", None)
     with kb.connect_closing() as conn:
-        rejection = _goal_mode_handoff_rejection(
+        rejection, judge_unavailable = _goal_mode_handoff_decision(
             kb.get_task(conn, tid),
             summary or "",
         )
@@ -2543,6 +2572,8 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        if judge_unavailable:
+            metadata = _stamp_judge_unavailable(metadata)
         ok, reason = kb.request_review(
             conn,
             tid,
