@@ -198,6 +198,13 @@ export interface ClientSessionState {
   awaitingResponse: boolean
   streamId: string | null
   sawAssistantPayload: boolean
+  /** Identity of the turn currently open on this session, taken from the
+   *  gateway's `turn_id`. `seq` orders frames but spans turns, so payload from
+   *  an older turn delivered after the next `message.start` is otherwise
+   *  indistinguishable from live payload (reconnect replay, run supersession).
+   *  Null when the turn was opened by a gateway that does not stamp identity —
+   *  unknown identity must never be treated as a mismatch. */
+  liveTurnId: string | null
   /** This window picked up a turn it did not start — it resumed onto a session
    *  that was already running somewhere else (leaving HUD mode, opening a
    *  pop-out mid-turn). It therefore holds the reply but never received the

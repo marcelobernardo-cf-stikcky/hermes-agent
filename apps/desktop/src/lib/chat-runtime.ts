@@ -37,6 +37,7 @@ export function createClientSessionState(
     awaitingResponse: false,
     streamId: null,
     sawAssistantPayload: false,
+    liveTurnId: null,
     adoptedRunningTurn: false,
     pendingBranchGroup: null,
     interrupted: false,

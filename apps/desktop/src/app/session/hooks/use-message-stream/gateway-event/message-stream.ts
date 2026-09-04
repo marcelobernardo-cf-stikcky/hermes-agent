@@ -19,6 +19,39 @@ import { clearActiveSessionTodos } from '@/store/todos'
 
 import type { GatewayEventContext } from './types'
 
+/**
+ * True when this payload belongs to a turn that is no longer the live one.
+ *
+ * `seq` orders frames within a session but spans turns, so a straggler from an
+ * earlier turn delivered after the next `message.start` reaches the renderer
+ * looking exactly like live payload. Identity is the only signal that
+ * separates them.
+ *
+ * Deliberately conservative — it rejects ONLY on a positive mismatch:
+ *   - payload has no `turn_id` (legacy gateway) → keep, identity unknown
+ *   - live turn has no id (legacy `message.start`) → keep, identity unknown
+ * Rejecting on unknown identity would silently drop real content whenever a
+ * newer renderer meets an older gateway, which is worse than the duplicate
+ * bubble this guards against.
+ */
+function isStaleTurnPayload(ctx: GatewayEventContext): boolean {
+  const eventTurnId = ctx.payload?.turn_id
+
+  if (typeof eventTurnId !== 'string' || !eventTurnId) {
+    return false
+  }
+
+  const liveTurnId = ctx.sessionId
+    ? ctx.deps.sessionStateByRuntimeIdRef.current.get(ctx.sessionId)?.liveTurnId
+    : null
+
+  if (typeof liveTurnId !== 'string' || !liveTurnId) {
+    return false
+  }
+
+  return liveTurnId !== eventTurnId
+}
+
 function firstBillingLine(text: string): string {
   return (text || '').split('\n')[0]?.trim() ?? ''
 }
@@ -67,6 +100,17 @@ function surfaceBillingBlock(sessionId: string, raw: unknown): void {
  *  interim → complete, thinking/reasoning deltas, moa.* progress, reaction. */
 export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
   const { deps, event, payload, sessionId, isActiveEvent, occurredAt } = ctx
+
+  // Cross-turn guard. `message.start` is exempt: it is what ESTABLISHES the
+  // live identity, so it can never be measured against it. Every other
+  // streaming event carries turn-bound payload and is checked.
+  //
+  // This sits ahead of the handlers rather than inside `mutateStream` because
+  // deltas are coalesced through a queue that drops the payload on the way —
+  // by flush time the identity is gone. Reject at the edge, where it exists.
+  if (event.type !== 'message.start' && isStaleTurnPayload(ctx)) {
+    return true
+  }
 
   const {
     appendAssistantDelta,
@@ -125,6 +169,11 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
         busy: true,
         awaitingResponse: true,
         sawAssistantPayload: false,
+        // Identity of the turn this start opens. Payload stamped with any
+        // other id is a straggler from an earlier turn and must not land in
+        // this bubble. Absent on a legacy gateway → null, and a null live id
+        // disables the check rather than rejecting everything.
+        liveTurnId: typeof payload?.turn_id === 'string' ? payload.turn_id : null,
         interrupted: false,
         interimBoundaryPending: false,
         // Backend accepted the turn — the no-payload settle gate below may

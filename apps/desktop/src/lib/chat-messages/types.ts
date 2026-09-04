@@ -48,6 +48,12 @@ export type GatewayEventPayload = {
   /** Unix seconds supplied by tests/newer gateways; the desktop falls back to
    * its local receipt clock when older gateways omit it. */
   timestamp?: number
+  /** Identity of the turn that produced this payload, stamped by the gateway.
+   * `seq` orders frames within a session but spans turns, so a straggler from
+   * an earlier turn cannot otherwise be told apart from live payload. Absent
+   * on older gateways; consumers must treat unknown identity as acceptable,
+   * never as a mismatch. */
+  turn_id?: string
   text?: string
   rendered?: string
   status?: string

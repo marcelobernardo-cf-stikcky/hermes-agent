@@ -152,3 +152,104 @@ def test_truncation_detection_semantics():
     assert event_replay.is_truncated("s1", 5)
     # Unknown session: nothing evicted, nothing truncated.
     assert not event_replay.is_truncated("nope", 0)
+
+
+# --- turn identity (turn_id) -------------------------------------------------
+# ``seq`` orders frames within a session but spans turns, so payload from an
+# older turn delivered after the next turn opened is indistinguishable from
+# live payload at the client edge. These cover the identity stamped alongside
+# seq in the same choke point.
+
+
+def test_turn_id_is_stable_across_a_turn_and_changes_on_next_start():
+    start1 = _frame("s1", "message.start")
+    delta1 = _frame("s1", "message.delta")
+    complete1 = _frame("s1", "message.complete")
+    start2 = _frame("s1", "message.start")
+    delta2 = _frame("s1", "message.delta")
+
+    for f in (start1, delta1, complete1, start2, delta2):
+        event_replay._stamp_event(f)
+
+    t1 = start1["params"]["payload"]["turn_id"]
+    assert delta1["params"]["payload"]["turn_id"] == t1
+    assert complete1["params"]["payload"]["turn_id"] == t1
+
+    t2 = start2["params"]["payload"]["turn_id"]
+    assert t2 != t1, "a new message.start must open a new turn identity"
+    assert delta2["params"]["payload"]["turn_id"] == t2
+
+
+def test_late_payload_keeps_the_closed_turn_id_not_the_new_one():
+    """The bug this identity exists for.
+
+    A delta emitted by turn 1 after turn 2 already started must still carry
+    turn 1's id, so the renderer can reject it instead of applying it to the
+    new bubble.
+    """
+    start1 = _frame("s1", "message.start")
+    event_replay._stamp_event(start1)
+    t1 = start1["params"]["payload"]["turn_id"]
+
+    complete1 = _frame("s1", "message.complete")
+    event_replay._stamp_event(complete1)
+
+    start2 = _frame("s1", "message.start")
+    event_replay._stamp_event(start2)
+    t2 = start2["params"]["payload"]["turn_id"]
+
+    # Turn 1's straggler, emitted with turn 1's identity already attached.
+    straggler = _frame("s1", "message.delta")
+    straggler["params"]["payload"]["turn_id"] = t1
+    event_replay._stamp_event(straggler)
+
+    assert straggler["params"]["payload"]["turn_id"] == t1
+    assert straggler["params"]["payload"]["turn_id"] != t2
+
+
+def test_replay_preserves_the_original_turn_id():
+    start = _frame("s1", "message.start")
+    delta = _frame("s1", "message.delta")
+    event_replay._stamp_event(start)
+    event_replay._stamp_event(delta)
+    original = delta["params"]["payload"]["turn_id"]
+
+    # A newer turn opens after the client dropped.
+    event_replay._stamp_event(_frame("s1", "message.start"))
+
+    replayed = events_since("s1", 0)
+    replayed_deltas = [
+        e for e in replayed if e["type"] == "message.delta"
+    ]
+    assert replayed_deltas, "replay must return the buffered delta"
+    assert replayed_deltas[0]["payload"]["turn_id"] == original, (
+        "replay must reuse the original turn id, not relabel it as current"
+    )
+
+
+def test_turn_id_not_stamped_on_session_control_events():
+    event_replay._stamp_event(_frame("s1", "message.start"))
+    info = _frame("s1", "session.info")
+    event_replay._stamp_event(info)
+
+    assert "turn_id" not in info["params"]["payload"]
+
+
+def test_tool_events_inherit_the_live_turn_id():
+    start = _frame("s1", "message.start")
+    tool = _frame("s1", "tool.start")
+    event_replay._stamp_event(start)
+    event_replay._stamp_event(tool)
+
+    assert tool["params"]["payload"]["turn_id"] == start["params"]["payload"]["turn_id"]
+
+
+def test_payload_absent_gets_turn_id_without_crashing():
+    start = {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {"type": "message.start", "session_id": "s1"},
+    }
+    event_replay._stamp_event(start)
+
+    assert start["params"]["payload"]["turn_id"]

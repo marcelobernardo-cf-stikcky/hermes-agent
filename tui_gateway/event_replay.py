@@ -43,6 +43,35 @@ _replay_lock = threading.Lock()
 _replay_buffers: "OrderedDict[str, deque]" = OrderedDict()
 _replay_next_seq: dict[str, int] = {}
 
+# Turn identity per session. ``seq`` orders frames within a session but spans
+# turns, so a payload emitted by an older turn after the next turn opened is
+# indistinguishable from live payload at the client edge (reconnect replay and
+# run supersession both produce that ordering). Stamping identity here — the
+# same choke point that already stamps ``seq`` — keeps the ~18 scattered
+# ``_emit("message.*")`` call sites untouched and guarantees replay reuses the
+# ORIGINAL id, because the ring buffers the already-stamped ``params`` dict.
+#
+# Scope is deliberately the streaming family (message.* + tool.*): those are
+# the events the renderer applies into a turn's bubble. Session-level control
+# events carry no turn-bound payload and are left alone.
+_TURN_SCOPED_EVENT_PREFIXES = ("message.", "tool.")
+# ``message.start`` opens a turn; the terminal event closes it. Payload that
+# arrives after the close keeps the closed turn's id, so the client can still
+# tell WHICH turn it belonged to instead of seeing it unlabeled.
+_TURN_START_EVENTS = frozenset({"message.start"})
+
+_turn_ids: dict[str, str] = {}
+
+
+def _turn_scoped(event_type: str) -> bool:
+    return event_type.startswith(_TURN_SCOPED_EVENT_PREFIXES)
+
+
+def current_turn_id(sid: str) -> str | None:
+    """Turn id currently stamped for *sid* (None before the first turn)."""
+    with _replay_lock:
+        return _turn_ids.get(sid or "")
+
 
 def replay_epoch() -> str:
     """Opaque token identifying this server process's seq numbering."""
@@ -65,6 +94,23 @@ def _stamp_event(obj: dict) -> None:
         seq = _replay_next_seq.get(sid, 0) + 1
         _replay_next_seq[sid] = seq
         params["seq"] = seq
+        event_type = str(params.get("type") or "")
+        if _turn_scoped(event_type):
+            if event_type in _TURN_START_EVENTS:
+                # New turn opens: mint identity here, at the same point seq is
+                # assigned, so every later frame of this turn inherits it.
+                _turn_ids[sid] = uuid.uuid4().hex
+            turn_id = _turn_ids.get(sid)
+            if turn_id is not None:
+                # setdefault, not assignment: a replayed frame arrives with its
+                # original id already present and must keep it. Overwriting
+                # would relabel old payload as current — the exact bug this
+                # identity is meant to catch.
+                payload = params.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                    params["payload"] = payload
+                payload.setdefault("turn_id", turn_id)
         buf = _replay_buffers.get(sid)
         if buf is None:
             buf = deque(maxlen=_REPLAY_BUFFER_MAX)
@@ -72,6 +118,7 @@ def _stamp_event(obj: dict) -> None:
             while len(_replay_buffers) > _REPLAY_SESSIONS_MAX:
                 _oldest_sid, _oldest_buf = _replay_buffers.popitem(last=False)
                 _replay_next_seq.pop(_oldest_sid, None)
+                _turn_ids.pop(_oldest_sid, None)
         buf.append((seq, params))
 
 
@@ -113,6 +160,7 @@ def reset_replay_state() -> None:
     with _replay_lock:
         _replay_buffers.clear()
         _replay_next_seq.clear()
+        _turn_ids.clear()
 
 
 def replay_stats() -> dict:
