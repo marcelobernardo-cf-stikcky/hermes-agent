@@ -78,29 +78,51 @@ def _record_kanban_budget_exhausted(
     (``WHERE ended_at IS NULL``) guarantees idempotence — if another path
     already closed the run this is a no-op — so it is safe to call from
     multiple exit paths.
+
+    Also passes ``expected_run_id`` (from ``HERMES_KANBAN_RUN_ID``, the
+    dispatcher-assigned run id for *this* worker process) through to
+    ``_record_task_failure`` so a stale worker whose run has already been
+    superseded (reclaimed, or re-claimed by a newer worker) cannot clobber
+    the successor's claim/status/counters (#03c16b25). Absent or
+    unparseable, the CAS is skipped and legacy (unscoped) behavior applies.
     """
     try:
         from hermes_cli import kanban_db as _kb
         _conn = _kb.connect()
+        _expected_run_id = None
+        _raw_run_id = os.environ.get("HERMES_KANBAN_RUN_ID")
+        if _raw_run_id:
+            try:
+                _expected_run_id = int(_raw_run_id)
+            except ValueError:
+                _expected_run_id = None
+        _kwargs = {
+            "error": (
+                f"Iteration budget exhausted "
+                f"({api_call_count}/{max_iterations}) — "
+                "task could not complete within the allowed "
+                "iterations"
+            ),
+            "outcome": "timed_out",
+            "release_claim": True,
+            "end_run": True,
+            "hold": True,
+            "event_payload_extra": {
+                "budget_used": api_call_count,
+                "budget_max": max_iterations,
+                "timeout_reason": "iteration_budget",
+            },
+        }
+        # Only pass the CAS param when we actually have a run id to pin —
+        # keeps the call signature byte-identical to legacy behavior for
+        # callers/tests that predate the ownership guard (#03c16b25).
+        if _expected_run_id is not None:
+            _kwargs["expected_run_id"] = _expected_run_id
         try:
             _kb._record_task_failure(
                 _conn,
                 kanban_task,
-                error=(
-                    f"Iteration budget exhausted "
-                    f"({api_call_count}/{max_iterations}) — "
-                    "task could not complete within the allowed "
-                    "iterations"
-                ),
-                outcome="timed_out",
-                release_claim=True,
-                end_run=True,
-                hold=True,
-                event_payload_extra={
-                    "budget_used": api_call_count,
-                    "budget_max": max_iterations,
-                    "timeout_reason": "iteration_budget",
-                },
+                **_kwargs,
             )
         finally:
             try:
