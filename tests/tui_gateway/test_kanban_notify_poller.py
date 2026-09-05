@@ -54,6 +54,46 @@ def _sub_rows(tid: str) -> list:
 
 
 class TestCollectKanbanNotifications:
+    def test_review_lifecycle_kinds_reach_desktop_session(self):
+        """review_requested must be claimed and formatted by the Desktop poller.
+
+        Measured 2026-09-05 (t_b01af2fd): the worker requested review, the
+        gateway notifier's TERMINAL_KINDS included it, but this poller's
+        _KANBAN_NOTIFY_KINDS did not — the Desktop session never woke.
+        The poller's kind set must be a superset of the gateway's wake set.
+        """
+        import re
+        from pathlib import Path
+        import gateway.kanban_watchers as kw
+        from tui_gateway import server as srv
+        src = Path(kw.__file__).read_text(encoding="utf-8")
+        m = re.search(r"TERMINAL_KINDS\s*=\s*\((.*?)\)", src, re.S)
+        gateway_kinds = set(re.findall(r'"([a-z_]+)"', m.group(1)))
+        assert gateway_kinds, "could not read gateway TERMINAL_KINDS"
+        assert gateway_kinds <= set(srv._KANBAN_NOTIFY_KINDS), (
+            f"Desktop poller misses kinds the gateway wakes on: "
+            f"{sorted(gateway_kinds - set(srv._KANBAN_NOTIFY_KINDS))}"
+        )
+
+        tid = _create_subscribed_task()
+        conn = kb.connect()
+        try:
+            kb.claim_task(conn, tid)
+            assert kb.request_review(
+                conn, tid, summary="deck pronto; juiz 3/3", reviewer="default",
+                force=True,  # operator override; workers pass expected_run_id
+            )
+        finally:
+            conn.close()
+
+        texts = _collect_kanban_notifications(_session())
+        assert len(texts) == 1, texts
+        assert tid in texts[0] and "review" in texts[0].lower()
+        assert "deck pronto; juiz 3/3" in texts[0]
+        assert "@default" in texts[0]
+        # cursor advanced: no replay
+        assert _collect_kanban_notifications(_session()) == []
+
     def test_zero_sub_board_is_never_opened_writable(self):
         conn = kb.connect()
         conn.close()

@@ -12037,6 +12037,10 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 _KANBAN_NOTIFY_KINDS = (
     "completed", "blocked", "gave_up", "crashed", "timed_out",
     "status", "archived", "unblocked",
+    # Review lifecycle + loop breaker: same set the gateway notifier wakes on
+    # (gateway/kanban_watchers.py TERMINAL_KINDS). Measured 2026-09-05,
+    # t_b01af2fd: worker requested review, Desktop poller never claimed it.
+    "review_requested", "changes_requested", "block_loop_detected",
 )
 _KANBAN_SILENT_KINDS = frozenset({"archived", "unblocked"})
 _KANBAN_POLL_SECONDS = 5.0
@@ -12180,6 +12184,19 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
         return f"⏱ {board_tag}{tag}Kanban {task_id} timed out (max_runtime={limit}s); will retry"
     if kind == "status":
         return f"🔄 {board_tag}{tag}Kanban {task_id} → {payload.get('status') or ''}"
+    if kind == "review_requested":
+        summary = (payload.get("summary") or "").strip()
+        reviewer = payload.get("reviewer") or ""
+        who = f" → @{reviewer}" if reviewer else ""
+        return (
+            f"🔍 {board_tag}{tag}Kanban {task_id} handed off for review{who} — {title}"
+            + (f"\n{summary}" if summary else "")
+        )
+    if kind == "changes_requested":
+        reason = (payload.get("reason") or payload.get("summary") or "").strip()
+        return f"↩ {board_tag}{tag}Kanban {task_id} changes requested — {title}" + (f"\n{reason}" if reason else "")
+    if kind == "block_loop_detected":
+        return f"🔁 {board_tag}{tag}Kanban {task_id} block loop detected; held for the orchestrator — {title}"
     return None
 
 
