@@ -53,6 +53,43 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def test_initial_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path) -> None:
+    """An initially human-blocked task must stay blocked without parents."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="initial human review", initial_status="blocked")
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_initial_block_unblocks_explicitly(kanban_home: Path) -> None:
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="initial human review", initial_status="blocked")
+        assert kb.unblock_task(conn, tid) is True
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.recompute_ready(conn) == 0
+
+
+def test_initial_block_with_dependency_promotes_after_explicit_unblock(
+    kanban_home: Path,
+) -> None:
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="unfinished prerequisite")
+        child = kb.create_task(
+            conn,
+            title="initial human review with prerequisite",
+            parents=[parent],
+            initial_status="blocked",
+        )
+        assert kb.get_task(conn, child).status == "blocked"
+        assert kb.recompute_ready(conn) == 0
+        assert kb.unblock_task(conn, child) is True
+        assert kb.get_task(conn, child).status == "todo"
+        kb.claim_task(conn, parent)
+        assert kb.complete_task(conn, parent, result="done")
+        assert kb.get_task(conn, child).status == "ready"
+
+
 def test_worker_block_is_not_auto_promoted_by_recompute_ready(kanban_home: Path) -> None:
     """A standalone task that a worker explicitly blocks for review
     must stay blocked across an arbitrary number of dispatcher ticks.

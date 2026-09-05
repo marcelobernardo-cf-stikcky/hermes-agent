@@ -3623,6 +3623,17 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                if initial_status == "blocked":
+                    # ``recompute_ready`` already treats an explicit blocked
+                    # event as a sticky human handoff. Record the same native
+                    # event used by ``block_task`` rather than inventing a
+                    # second marker or classifying every blocked row as sticky.
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {"source": "initial_status"},
+                    )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
