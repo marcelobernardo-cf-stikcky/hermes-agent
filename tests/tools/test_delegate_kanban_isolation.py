@@ -209,6 +209,41 @@ def test_delegate_child_kanban_cli_cannot_delete_parent_board(
     assert kb.board_dir("victim").is_dir()
 
 
+def test_shared_local_snapshot_does_not_promote_child_identity_to_parent(
+    monkeypatch,
+    tmp_path,
+):
+    """A child marker must not persist in the shared bash snapshot."""
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+
+    from agent.delegation_context import delegated_child_context
+    from tools.environments.local import LocalEnvironment
+
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=15)
+    try:
+        parent = env.execute("printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\"")
+        assert parent["output"] == ""
+
+        with delegated_child_context():
+            child = env.execute(
+                "printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\""
+            )
+            assert child["output"] == "1"
+
+        parent_again = env.execute(
+            "printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\""
+        )
+        assert parent_again["output"] == ""
+
+        with delegated_child_context():
+            child_again = env.execute(
+                "printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\""
+            )
+            assert child_again["output"] == "1"
+    finally:
+        env.cleanup()
+
+
 def test_delegate_child_attach_url_guard_leaves_no_row_or_file(monkeypatch, tmp_path):
     kb, tid, _workspace, attachments_root = _make_running_kanban_task(monkeypatch, tmp_path)
 
