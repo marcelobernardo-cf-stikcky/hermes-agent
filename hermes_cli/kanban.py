@@ -18,7 +18,9 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1639,7 +1641,63 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_create_preflight_hooks(args: argparse.Namespace) -> Optional[str]:
+    """Run the configured ``pre_tool_call`` hooks matching ``kanban_create``
+    against a CLI ``create``, exactly as the tool path would.
+
+    The orchestrator creates most cards from the CLI, not the tool — so a
+    gate wired only on ``kanban_create`` never sees them (measured
+    2026-09-05: every card in the 70-run sample was CLI-born). Same hook,
+    same JSON-on-stdin contract, same exit-code semantics (2 = block).
+    Returns the block reason, or ``None`` to proceed. Fails open on
+    hook/config errors: a broken hook must not lock the board.
+    """
+    try:
+        from hermes_cli.config import load_config
+        hooks = (load_config().get("hooks") or {}).get("pre_tool_call") or []
+    except Exception:
+        return None
+    payload = json.dumps({
+        "hook_event_name": "pre_tool_call",
+        "tool_name": "kanban_create",
+        "tool_input": {
+            "board": getattr(args, "board", None) or os.environ.get("HERMES_KANBAN_BOARD") or "",
+            "title": args.title, "body": args.body or "",
+            "assignee": args.assignee or "",
+            "workspace": args.workspace or "",
+            "max_runtime": getattr(args, "max_runtime", None),
+            "model": getattr(args, "model_override", None),
+            "triage": bool(getattr(args, "triage", False)),
+        },
+    })
+    for hook in hooks:
+        matcher = str((hook or {}).get("matcher") or "")
+        if not re.search(matcher, "kanban_create"):
+            continue
+        cmd = str(hook.get("command") or "").strip()
+        if not cmd:
+            continue
+        try:
+            proc = subprocess.run(
+                shlex.split(cmd, posix=(os.name != "nt")), input=payload,
+                capture_output=True, text=True, encoding="utf-8",
+                timeout=float(hook.get("timeout") or 5),
+            )
+        except Exception:
+            continue
+        if proc.returncode == 2:
+            try:
+                return json.loads(proc.stdout).get("reason") or proc.stdout.strip()
+            except Exception:
+                return proc.stdout.strip() or "blocked by pre_tool_call hook"
+    return None
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
+    reason = _run_create_preflight_hooks(args)
+    if reason:
+        print(f"kanban: create blocked by preflight — {reason}", file=sys.stderr)
+        return 2
     try:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))

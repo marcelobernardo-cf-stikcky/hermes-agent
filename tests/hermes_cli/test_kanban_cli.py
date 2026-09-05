@@ -29,6 +29,41 @@ def kanban_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _create_args(**over):
+    base = dict(title="t", body="", assignee="rigger", workspace="dir:/x",
+                board=None, max_runtime=None, model_override=None, triage=True)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_cli_create_runs_kanban_create_hooks(tmp_path, monkeypatch):
+    """CLI `create` honours the same pre_tool_call hooks the kanban_create
+    tool does: exit 2 + {"reason"} blocks with that reason; exit 0 passes;
+    a non-matching matcher is ignored. Orchestrators create cards from the
+    CLI, so a gate wired only on the tool would never fire (2026-09-05)."""
+    blocker = tmp_path / "block.py"
+    blocker.write_text(
+        "import json,sys; p=json.load(sys.stdin)\n"
+        "assert p['tool_name']=='kanban_create' and p['tool_input']['title']=='t'\n"
+        "print(json.dumps({'decision':'block','reason':'NEEDS_LOCATION'})); sys.exit(2)\n"
+    )
+    passer = tmp_path / "pass.py"
+    passer.write_text("import sys; sys.exit(0)\n")
+    import sys as _sys
+    cfg = {"hooks": {"pre_tool_call": [
+        {"matcher": "memory", "command": f"{_sys.executable} {blocker}"},   # must NOT fire
+        {"matcher": "kanban_create", "command": f"{_sys.executable} {passer}"},
+    ]}}
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+    assert kc._run_create_preflight_hooks(_create_args()) is None
+
+    cfg["hooks"]["pre_tool_call"].append(
+        {"matcher": "kanban_create", "command": f"{_sys.executable} {blocker}"})
+    assert kc._run_create_preflight_hooks(_create_args()) == "NEEDS_LOCATION"
+
+    # fail-open: broken hook command must not lock the board
+    cfg["hooks"]["pre_tool_call"] = [{"matcher": "kanban_create", "command": "definitely-not-a-binary-xyz"}]
+    assert kc._run_create_preflight_hooks(_create_args()) is None
 
 
 
