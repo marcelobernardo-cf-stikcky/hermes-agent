@@ -5363,6 +5363,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # Track whether the user passed -m / --model so resume knows not to
         # clobber an explicit override with the session's stored model.
         self._explicit_model_override = bool(model)
+        # `-m <alias>` must honour config.yaml `model_aliases:` exactly like
+        # `-Q` (oneshot.py) and `/model` do. Without this, the Kanban
+        # dispatcher's `hermes -p X --cli -m sonnet` sends the literal alias
+        # to the provider (Anthropic 404 "model: sonnet"), the run falls to
+        # the slowest fallback and the card's routing intent is lost.
+        if model and not provider:
+            try:
+                from hermes_cli import model_switch as _ms
+                _ms._ensure_direct_aliases()
+                _direct = _ms.DIRECT_ALIASES.get(model.strip().lower())
+            except Exception:
+                _direct = None
+            if _direct is not None and not _direct.base_url:
+                model, provider = _direct.model, _direct.provider
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
         # A ``moa:<preset>`` model string selects the MoA virtual provider in
         # one shot (parity with interactive ``/moa`` and the model picker). Do
