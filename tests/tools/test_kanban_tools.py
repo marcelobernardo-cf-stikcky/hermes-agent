@@ -83,6 +83,10 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert "body" not in d["task"]
     assert "latest_run" in d and d["latest_run"]["status"] == "running"
     assert "comments" in d
+    # A healthy read must not be classified as a tool failure by the
+    # display heuristic (it keys on a literal '"error"' substring).
+    from agent.display import _detect_tool_failure
+    assert _detect_tool_failure("kanban_show", out) == (False, "")
 
 
 def test_show_lean_for_own_card_full_for_others(worker_env, monkeypatch):

@@ -653,6 +653,13 @@ def _handle_show(args: dict, **kw) -> str:
             # worker can act on: status, recent comments, and the latest run.
             if os.environ.get("HERMES_KANBAN_TASK") == tid:
                 t = task
+                latest = _run_dict(runs[-1]) if runs else None
+                # Drop null keys: the display-layer failure heuristic
+                # (agent/display.py::_detect_tool_failure) treats a literal
+                # '"error"' substring as failure, so `"error": null` on a
+                # healthy run flags a clean read as an error to the model.
+                if latest:
+                    latest = {k: v for k, v in latest.items() if v is not None}
                 return json.dumps({
                     "task": {
                         "id": t.id, "title": t.title, "status": t.status,
@@ -662,7 +669,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "parents": parents,
                     "children": children,
                     "comments": comment_dicts[-3:],
-                    "latest_run": _run_dict(runs[-1]) if runs else None,
+                    "latest_run": latest,
                     "note": (
                         "worker view: body and handoffs are already in your first "
                         "message; only the last 3 comments and latest run are shown."
