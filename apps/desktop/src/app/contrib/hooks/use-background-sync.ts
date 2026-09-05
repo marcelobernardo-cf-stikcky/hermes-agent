@@ -351,7 +351,7 @@ export function rehydrateLiveSessionStatuses(
     const runtimeSessionId = session.id?.trim()
     const storedSessionId = session.session_key?.trim()
     const needsInput = session.status === 'waiting'
-    const working = session.status === 'working' || needsInput
+    const working = session.status === 'starting' || session.status === 'working' || needsInput
 
     if (!runtimeSessionId || !storedSessionId) {
       continue

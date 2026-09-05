@@ -624,13 +624,21 @@ describe('rehydrateLiveSessionStatuses', () => {
     expect($stalledSessionIds.get()).toEqual([])
   })
 
-  it('ignores idle, starting, and malformed live-session rows', () => {
+  it('surfaces a starting wake turn as working before the first tool', () => {
     rehydrateLiveSessionStatuses({
       sessions: [
         { id: 'runtime-idle', session_key: 'idle-session', status: 'idle' },
         { id: 'runtime-starting', session_key: 'starting-session', status: 'starting' },
         { id: 'runtime-malformed', status: 'working' }
       ]
+    })
+
+    expect($workingSessionIds.get()).toEqual(['starting-session'])
+    expect($attentionSessionIds.get()).toEqual([])
+    expect($stalledSessionIds.get()).toEqual([])
+
+    rehydrateLiveSessionStatuses({
+      sessions: [{ id: 'runtime-terminal', session_key: 'terminal-session', status: 'idle' }]
     })
 
     expect($workingSessionIds.get()).toEqual([])
