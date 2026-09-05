@@ -51,8 +51,17 @@ def test_nudge_when_no_terminal_tool(clear_kanban_env):
     assert nudge is not None
     assert "kanban_complete" in nudge
     assert "kanban_block" in nudge
+    assert "kanban_request_review" in nudge
     assert "t_46be8aa5" in nudge
     assert "protocol violation" in nudge.lower() or "protocol" in nudge.lower()
+    assert "kanban_show" in nudge
+    assert nudge.index("kanban_show") < nudge.index("Follow the task's review model")
+    assert "pre-created review, QA, or release child" in nudge
+    assert "kanban_complete(summary=..., metadata=..., artifacts=[...])" in nudge
+    assert "complete" in nudge[nudge.index("pre-created review, QA, or release child") :]
+    assert "do not request same-card review" in nudge
+    assert "only when the task is genuinely final" in nudge
+    assert "no review is pending" in nudge
 
 
 def test_no_nudge_after_kanban_complete(clear_kanban_env):
