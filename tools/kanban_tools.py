@@ -166,6 +166,64 @@ def _worker_run_id(task_id: str) -> Optional[int]:
         return None
 
 
+def _reject_self_approved_review(kb, conn, task_id: str) -> Optional[str]:
+    """Refuse ``kanban_complete`` when THIS worker's run was claimed FROM
+    ``review`` and the ``review_requested`` event it is closing out never
+    named a reviewer distinct from the implementer.
+
+    Guards ONLY this agent-facing tool — deliberately NOT
+    ``hermes_cli.kanban_db.complete_task`` itself, which is also the
+    human/dashboard approval path for a run-less ``review`` task (#54823)
+    and the legitimate reopen/reclaim path where no reviewer was ever set
+    (see ``test_reopening_parent_retracts_review_and_blocks_approval``); a
+    guard placed at that layer caught both cases and broke the second one.
+    A run claimed FROM ``review`` inherits ``source_status=review`` on its
+    ``claimed`` event (see ``kb.claim_review_task``); when that is true and
+    the ``review_requested`` event has no distinct reviewer, an agent must
+    not self-approve via this tool — this is exactly the reviewer=None gap
+    that let a wake-resumed run complete its own review with zero elapsed
+    time (run #160, #t_ae5576ac).
+
+    Returns ``None`` when not applicable, else a diagnostic string.
+    """
+    run_id = _worker_run_id(task_id)
+    if run_id is None:
+        return None
+    claimed_events = [
+        e for e in kb.list_events(conn, task_id)
+        if e.kind == "claimed" and e.run_id == run_id
+    ]
+    if not claimed_events:
+        return None
+    claimed_payload = claimed_events[-1].payload
+    if not isinstance(claimed_payload, dict) or claimed_payload.get("source_status") != "review":
+        return None  # ordinary implementer completion, not a review claim.
+    review_events = [
+        e for e in kb.list_events(conn, task_id) if e.kind == "review_requested"
+    ]
+    if not review_events:
+        return None
+    payload = review_events[-1].payload
+    if not isinstance(payload, dict):
+        payload = {}
+    implementer = payload.get("implementer")
+    reviewer = payload.get("reviewer")
+    if (
+        not isinstance(reviewer, str)
+        or not reviewer.strip()
+        or (isinstance(implementer, str) and reviewer.strip() == implementer.strip())
+    ):
+        return (
+            "this run was claimed from review with no reviewer distinct "
+            "from the implementer on record (reviewer=None or "
+            "reviewer==implementer); an agent cannot self-approve via "
+            "kanban_complete — request a human/dashboard approval, or "
+            "call kanban_request_changes and re-request review with an "
+            "explicit reviewer"
+        )
+    return None
+
+
 def _stamp_worker_session_metadata(
     task_id: str, metadata: Optional[dict]
 ) -> Optional[dict]:
@@ -584,15 +642,38 @@ def _handle_show(args: dict, **kw) -> str:
                     "started_at": r.started_at, "ended_at": r.ended_at,
                 }
 
+            comment_dicts = [
+                {"author": c.author, "body": c.body, "created_at": c.created_at}
+                for c in comments
+            ]
+            # A dispatcher worker re-reading ITS OWN card already holds the
+            # body + worker_context in its first user turn (build_worker_context
+            # at spawn). Re-sending them measured 29 KB/call, 2x per run, on
+            # every profile (2026-09-05, t_3d0deed0). Return only the delta a
+            # worker can act on: status, recent comments, and the latest run.
+            if os.environ.get("HERMES_KANBAN_TASK") == tid:
+                t = task
+                return json.dumps({
+                    "task": {
+                        "id": t.id, "title": t.title, "status": t.status,
+                        "assignee": t.assignee, "current_run_id": t.current_run_id,
+                        "workspace_path": t.workspace_path,
+                    },
+                    "parents": parents,
+                    "children": children,
+                    "comments": comment_dicts[-3:],
+                    "latest_run": _run_dict(runs[-1]) if runs else None,
+                    "note": (
+                        "worker view: body and handoffs are already in your first "
+                        "message; only the last 3 comments and latest run are shown."
+                    ),
+                })
+
             return json.dumps({
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
-                "comments": [
-                    {"author": c.author, "body": c.body,
-                     "created_at": c.created_at}
-                    for c in comments
-                ],
+                "comments": comment_dicts,
                 "events": [
                     {"kind": e.kind, "payload": e.payload,
                      "created_at": e.created_at, "run_id": e.run_id}
@@ -776,6 +857,9 @@ def _handle_complete(args: dict, **kw) -> str:
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
             task = kb.get_task(conn, tid)
+            self_review_reason = _reject_self_approved_review(kb, conn, tid)
+            if self_review_reason is not None:
+                return tool_error(f"kanban_complete blocked: {self_review_reason}")
             rejection, judge_unavailable = _goal_mode_handoff_decision(
                 task,
                 (summary or result or "").strip(),
@@ -797,6 +881,7 @@ def _handle_complete(args: dict, **kw) -> str:
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
                     expected_run_id=_worker_run_id(tid),
+                    with_reason=True,
                 )
             except kb.ArtifactPreservationError as artifact_err:
                 return tool_error(
@@ -825,9 +910,12 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            else:
+                ok, fail_reason = ok
             if not ok:
                 return tool_error(
-                    f"could not complete {tid} (unknown id or already terminal)"
+                    f"could not complete {tid}: "
+                    f"{fail_reason or 'unknown id or already terminal'}"
                 )
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)

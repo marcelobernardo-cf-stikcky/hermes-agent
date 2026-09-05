@@ -76,8 +76,26 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert "task" in d
     assert d["task"]["id"] == worker_env
     assert d["task"]["status"] == "running"
-    assert "worker_context" in d
-    assert "runs" in d
+    # Worker re-reading its OWN card gets the lean delta view: no body,
+    # no worker_context, no event log (all already in its first turn).
+    assert "worker_context" not in d
+    assert "events" not in d
+    assert "body" not in d["task"]
+    assert "latest_run" in d and d["latest_run"]["status"] == "running"
+    assert "comments" in d
+
+
+def test_show_lean_for_own_card_full_for_others(worker_env, monkeypatch):
+    """The lean view applies only to the worker's own card; any other task
+    (orchestrator reading, or a worker peeking at a sibling) keeps the full
+    payload. Mutation check: unset HERMES_KANBAN_TASK -> full view again."""
+    from tools import kanban_tools as kt
+    lean = json.loads(kt._handle_show({"task_id": worker_env}))
+    assert "worker_context" not in lean
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    full = json.loads(kt._handle_show({"task_id": worker_env}))
+    assert "worker_context" in full and "events" in full and "runs" in full
+    assert len(json.dumps(full)) > len(json.dumps(lean))
 
 
 def test_list_filters_tasks(monkeypatch, worker_env):
@@ -109,6 +127,45 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     })
     tenant_ids = [t["id"] for t in json.loads(tenant_out)["tasks"]]
     assert tenant_ids == [c]
+
+
+def test_complete_rejects_self_approved_review(monkeypatch, worker_env):
+    """A worker resumed on a run claimed FROM review (no reviewer distinct
+    from the implementer) must not self-approve via kanban_complete — the
+    reviewer=None gap that let run #160 complete its own review with zero
+    elapsed time (#t_ae5576ac). The guard lives at the TOOL layer, not in
+    ``kanban_db.complete_task`` (see
+    ``tests/hermes_cli/test_kanban_review_lifecycle_complete.py::test_complete_task_allows_review_approval_with_reviewer_none``
+    for why that layer must stay permissive)."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    tid = worker_env
+    conn = kb.connect()
+    try:
+        implementation = kb.get_task(conn, tid)
+        assert kb.request_review(
+            conn, tid, summary="ready",
+            expected_run_id=implementation.current_run_id,
+        )  # reviewer=None
+        review = kb.claim_review_task(conn, tid, claimer="test-worker:1")
+        assert review is not None
+        review_run_id = review.current_run_id
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", str(review_run_id))
+    out = json.loads(kt._handle_complete({"summary": "self-approved"}))
+    assert out.get("error")
+    assert "self-approve" in out["error"]
+
+    conn = kb.connect()
+    try:
+        unchanged = kb.get_task(conn, tid)
+        assert unchanged.status == "running"
+        assert unchanged.current_run_id == review_run_id
+    finally:
+        conn.close()
 
 
 def test_complete_happy_path(worker_env):
