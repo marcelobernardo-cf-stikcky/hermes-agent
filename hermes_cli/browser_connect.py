@@ -201,8 +201,35 @@ def real_profile_data_dir(browser: str, system: str | None = None) -> str | None
     return next((c for c in candidates if os.path.isdir(c)), candidates[0])
 
 
+def is_real_browser_binary(path: str | None) -> bool:
+    """False for missing files, 0-byte files, and Windows App Execution Aliases.
+
+    ``WindowsApps\\chrome.exe`` is a Store stub: launching it opens
+    "Install Chrome from the Microsoft Store" instead of Chrome.
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    parts = os.path.normcase(os.path.normpath(path)).split(os.sep)
+    if "windowsapps" in parts:
+        return False
+    try:
+        return os.path.getsize(path) != 0
+    except OSError:
+        return True  # isfile already passed; size unreadable (mocked path)
+
+
 def _first_present(paths) -> str | None:
-    return next((p for p in paths if p and os.path.isfile(p)), None)
+    return next((p for p in paths if p and is_real_browser_binary(p)), None)
+
+
+def first_installed_chromium(system: str | None = None) -> str | None:
+    """First Chromium-family product with a real binary (Chrome, then Chromium, Brave, Edge).
+
+    Used when the OS default is Opera/Firefox/etc. so real-profile browsing still
+    launches Google Chrome rather than failing closed into a packaged/Store stub.
+    """
+    system = system or platform.system()
+    return next((b.key for b in _BROWSERS if chromium_executable(b.key, system)), None)
 
 
 def chromium_executable(browser: str, system: str | None = None) -> str | None:
@@ -696,10 +723,12 @@ def _debug_candidate_paths(system: str):
         if system == "Darwin":
             yield b.mac_app
         elif system == "Windows":
-            yield from map(shutil.which, b.win_bins)
+            # Install paths BEFORE PATH: shutil.which("chrome.exe") often hits the
+            # 0-byte WindowsApps Store alias first.
             for base in filter(None, install_bases):
                 for parts in b.win_install:
                     yield os.path.join(base, *parts)
+            yield from map(shutil.which, b.win_bins)
         else:
             yield from map(shutil.which, b.linux_bins)
             yield from b.linux_paths
@@ -716,7 +745,7 @@ def get_chrome_debug_candidates(system: str) -> list[str]:
     candidates: dict[str, str] = {}  # normalized -> first path seen (dedupe, keep order)
     for path in filter(None, _debug_candidate_paths(system)):
         normalized = os.path.normcase(os.path.normpath(path))
-        if normalized not in candidates and os.path.isfile(path):
+        if normalized not in candidates and is_real_browser_binary(path):
             candidates[normalized] = path
     return list(candidates.values())
 

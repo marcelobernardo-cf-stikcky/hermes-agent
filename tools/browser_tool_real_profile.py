@@ -214,7 +214,8 @@ def _real_profile_cdp() -> tuple:
                       "Set browser.engine to 'auto' or 'chrome' to use real-profile browsing, or turn the toggle off.")
 
     from hermes_cli.browser_connect import (chromium_executable, detect_default_chromium,
-                                            real_profile_copy_dir, snapshot_real_profile)
+                                            first_installed_chromium, real_profile_copy_dir,
+                                            snapshot_real_profile)
 
     with _bt._real_profile_cdp_lock:
         cached = _bt._real_profile_cdp_cache.get("cdp")
@@ -223,6 +224,11 @@ def _real_profile_cdp() -> tuple:
         _bt._real_profile_cdp_cache.pop("cdp", None)
 
         browser = detect_default_chromium()
+        if browser is None:
+            # OS default is Opera/Firefox/Safari/etc. Chrome is still installed —
+            # use it rather than fail closed (which dumps the agent onto a Store
+            # stub or packaged Playwright Chromium that never shows a window).
+            browser = first_installed_chromium()
         unsupported = _real_profile_unsupported_reason(browser)
         if unsupported:
             return None, unsupported

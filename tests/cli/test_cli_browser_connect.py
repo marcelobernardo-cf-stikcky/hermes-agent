@@ -220,4 +220,32 @@ class TestChromeDebugLaunch:
         assert command.startswith(f'"{chrome}" --remote-debugging-port=9222')
         assert "'" not in command
 
+    def test_windows_store_alias_is_skipped(self, tmp_path):
+        stub = str(tmp_path / "WindowsApps" / "chrome.exe")
+        real = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
+        def fake_isfile(path):
+            return path in {stub, real}
+
+        def fake_getsize(path):
+            return 0 if path == stub else 4_000_000
+
+        with patch("hermes_cli.browser_connect.shutil.which",
+                   side_effect=lambda name: stub if name == "chrome.exe" else None), \
+             patch("hermes_cli.browser_connect.os.path.isfile", side_effect=fake_isfile), \
+             patch("hermes_cli.browser_connect.os.path.getsize", side_effect=fake_getsize):
+            from hermes_cli.browser_connect import get_chrome_debug_candidates, is_real_browser_binary
+            assert is_real_browser_binary(stub) is False
+            candidates = get_chrome_debug_candidates("Windows")
+
+        assert stub not in candidates
+        assert real in candidates
+
+    def test_first_installed_chromium_prefers_chrome(self):
+        real = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        with patch("hermes_cli.browser_connect.chromium_executable",
+                   side_effect=lambda key, system=None: real if key == "chrome" else None):
+            from hermes_cli.browser_connect import first_installed_chromium
+            assert first_installed_chromium("Windows") == "chrome"
+
 
