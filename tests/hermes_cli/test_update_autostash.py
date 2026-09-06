@@ -7,6 +7,7 @@ import pytest
 
 from hermes_cli import config as hermes_config
 from hermes_cli import main as hermes_main
+from hermes_cli import update_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +93,7 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_main, "_restore_stashed_changes", lambda *a, **kw: True)
     monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: [])
     monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: [])
-    monkeypatch.setattr(hermes_config, "check_config_version", lambda: (5, 5))
+    monkeypatch.setattr(hermes_config, "check_config_version", lambda **_kwargs: (5, 5))
     monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
     monkeypatch.setattr(hermes_main, "_upgrade_pip_before_lazy_refresh", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_refresh_active_lazy_features", lambda *a, **kw: True)
@@ -311,7 +312,7 @@ def test_cmd_update_orphan_history_backs_up_before_reset(monkeypatch, tmp_path, 
     assert "orphan divergence" in out
     assert ref_name in out
     # The user is told the backup is temporary and when it expires.
-    assert f"expires after {hermes_main._ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days" in out
+    assert f"expires after {update_cmd._ORPHAN_RESCUE_REF_MAX_AGE_DAYS} days" in out
 
 
 def test_cmd_update_orphan_rescue_ref_write_failure_message_is_honest(monkeypatch, tmp_path, capsys):
@@ -342,7 +343,7 @@ def test_cmd_update_orphan_rescue_refs_pruned_beyond_keep_limit(monkeypatch, tmp
     # All refs are recent (within the age window) so only the count cap
     # applies — the age-expiry path is exercised separately below.
     now = datetime.now(timezone.utc)
-    total = hermes_main._ORPHAN_RESCUE_REFS_TO_KEEP + 2
+    total = update_cmd._ORPHAN_RESCUE_REFS_TO_KEEP + 2
     stale_refs = [
         "refs/hermes-update-backups/orphan-main-"
         f"{(now - timedelta(hours=total - i)).strftime('%Y%m%d-%H%M%S')}-abc"
@@ -359,9 +360,9 @@ def test_cmd_update_orphan_rescue_refs_pruned_beyond_keep_limit(monkeypatch, tmp
         c for c in recorded
         if "update-ref" in " ".join(str(x) for x in c) and "-d" in c
     ]
-    assert len(delete_calls) == total - hermes_main._ORPHAN_RESCUE_REFS_TO_KEEP
+    assert len(delete_calls) == total - update_cmd._ORPHAN_RESCUE_REFS_TO_KEEP
     deleted_refs = {c[c.index("-d") + 1] for c in delete_calls}
-    assert deleted_refs == set(stale_refs[: total - hermes_main._ORPHAN_RESCUE_REFS_TO_KEEP])
+    assert deleted_refs == set(stale_refs[: total - update_cmd._ORPHAN_RESCUE_REFS_TO_KEEP])
 
 
 def test_cmd_update_orphan_rescue_refs_expired_by_age(monkeypatch, tmp_path, capsys):
@@ -374,7 +375,7 @@ def test_cmd_update_orphan_rescue_refs_expired_by_age(monkeypatch, tmp_path, cap
     _setup_update_mocks(monkeypatch, tmp_path)
 
     now = datetime.now(timezone.utc)
-    old = now - timedelta(days=hermes_main._ORPHAN_RESCUE_REF_MAX_AGE_DAYS + 5)
+    old = now - timedelta(days=update_cmd._ORPHAN_RESCUE_REF_MAX_AGE_DAYS + 5)
     fresh = now - timedelta(days=1)
     expired_ref = (
         "refs/hermes-update-backups/orphan-main-"
@@ -416,7 +417,7 @@ def test_prune_orphan_rescue_refs_leaves_unparseable_names_alone():
         return NS(stdout="", stderr="", returncode=0)
 
     with mock_patch.object(hermes_main.subprocess, "run", side_effect=fake_run):
-        hermes_main._prune_orphan_rescue_refs(["git"], ".", "main")
+        update_cmd._prune_orphan_rescue_refs(["git"], ".", "main")
 
     delete_calls = [c for c in calls if "update-ref" in c and "-d" in c]
     assert delete_calls == []
@@ -764,6 +765,7 @@ def test_restore_rejects_invalid_python_and_keeps_clean_updated_tree(
     """A cleanly-applied stash must not be allowed to brick every agent turn."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -787,6 +789,7 @@ def test_restore_rejects_invalid_python_and_keeps_clean_updated_tree(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ())
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -809,6 +812,7 @@ def test_restore_rejects_new_import_time_failure_and_preserves_stash(
     """A valid-Python stash must not introduce a critical import failure."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -831,6 +835,7 @@ def test_restore_rejects_new_import_time_failure_and_preserves_stash(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("consumer",))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("consumer",))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -851,6 +856,7 @@ def test_restore_allows_preexisting_import_time_failure(monkeypatch, tmp_path):
     """A restore may proceed when it does not worsen an environment failure."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -876,6 +882,7 @@ def test_restore_allows_preexisting_import_time_failure(monkeypatch, tmp_path):
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("consumer",))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("consumer",))
 
     assert hermes_main._restore_stashed_changes(
         ["git"], tmp_path, stash_ref, prompt_user=False
@@ -890,6 +897,7 @@ def test_restore_rejects_later_failure_masked_by_preexisting_failure(
     """Every critical module must be compared, not only the first failure."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -915,6 +923,7 @@ def test_restore_rejects_later_failure_masked_by_preexisting_failure(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -937,6 +946,7 @@ def test_restore_rejects_system_exit_masked_by_preexisting_failure(
     """A terminating import must be compared instead of hiding the marker."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -962,6 +972,7 @@ def test_restore_rejects_system_exit_masked_by_preexisting_failure(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -982,6 +993,7 @@ def test_restore_rejects_probe_termination(monkeypatch, tmp_path, capsys):
     """A stash cannot bypass import validation by terminating the probe."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -1004,6 +1016,7 @@ def test_restore_rejects_probe_termination(monkeypatch, tmp_path, capsys):
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("consumer",))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("consumer",))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -1025,8 +1038,10 @@ def test_restore_stays_parked_when_untracked_baseline_is_unknown(
 ):
     """Unknown cleanup scope must not turn into a destructive empty baseline."""
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_stash as update_cmd_stash
 
     monkeypatch.setattr(update_cmd, "_git_untracked_paths", lambda *_args: None)
+    monkeypatch.setattr(update_cmd_stash, "_git_untracked_paths", lambda *_args: None)
 
     restored = hermes_main._restore_stashed_changes(
         ["git"], tmp_path, "stash@{0}", prompt_user=False
@@ -1043,8 +1058,10 @@ def test_reject_does_not_claim_cleanup_when_git_state_is_unknown(
 ):
     """Cleanup failures must not be reported as a restored clean tree."""
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_stash as update_cmd_stash
 
     monkeypatch.setattr(update_cmd, "_git_untracked_paths", lambda *_args: None)
+    monkeypatch.setattr(update_cmd_stash, "_git_untracked_paths", lambda *_args: None)
 
     with pytest.raises(SystemExit):
         update_cmd._reject_unsafe_stash_restore(
@@ -1062,6 +1079,8 @@ def test_restore_rejects_unknown_restored_python_paths(
     """A failed post-apply path query cannot skip restored syntax validation."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_stash as update_cmd_stash
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -1083,7 +1102,9 @@ def test_restore_rejects_unknown_restored_python_paths(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ())
     monkeypatch.setattr(update_cmd, "_restored_python_paths", lambda *_args: None)
+    monkeypatch.setattr(update_cmd_stash, "_restored_python_paths", lambda *_args: None)
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -1226,7 +1247,7 @@ def test_prune_orphan_rescue_refs_with_real_git_unpins_objects(tmp_path):
     assert git("cat-file", "-e", snap_sha, check=False).returncode == 0
 
     # Prune (the ref's 2020 timestamp is way past the age window) → ref gone.
-    hermes_main._prune_orphan_rescue_refs(["git"], tmp_path, "main")
+    update_cmd._prune_orphan_rescue_refs(["git"], tmp_path, "main")
     remaining = git("for-each-ref", "refs/hermes-update-backups/").stdout
     assert old_ref not in remaining
 
