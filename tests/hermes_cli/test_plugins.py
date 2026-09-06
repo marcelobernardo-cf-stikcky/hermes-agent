@@ -1168,6 +1168,91 @@ class TestForceReloadSymmetry:
         assert elapsed < 5.0
         hold.set()
 
+    def test_pre_tool_call_concurrent_calls_wait_and_keep_payloads(self, monkeypatch):
+        """A healthy concurrent policy call waits for its own callback turn."""
+        import time
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins._resolve_hook_callback_timeout", lambda: 0.5
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        seen = []
+
+        def policy(**kwargs):
+            seen.append(kwargs["args"])
+            if kwargs["args"]["deny"]:
+                entered.set()
+                release.wait(timeout=1.0)
+                return {"action": "block", "message": "denied"}
+            return {"action": "approve", "message": "allowed"}
+
+        mgr = PluginManager()
+        mgr._hooks["pre_tool_call"] = [policy]
+        results = {}
+        first = threading.Thread(
+            target=lambda: results.setdefault("deny", mgr.invoke_hook(
+                "pre_tool_call", tool_name="x", args={"deny": True}
+            ))
+        )
+        second = threading.Thread(
+            target=lambda: results.setdefault("allow", mgr.invoke_hook(
+                "pre_tool_call", tool_name="x", args={"deny": False}
+            ))
+        )
+        first.start()
+        assert entered.wait(timeout=1.0)
+        second.start()
+        time.sleep(0.05)
+        assert "allow" not in results
+        release.set()
+        first.join(timeout=1.0)
+        second.join(timeout=1.0)
+
+        assert results == {
+            "deny": [{"action": "block", "message": "denied"}],
+            "allow": [{"action": "approve", "message": "allowed"}],
+        }
+        assert seen == [{"deny": True}, {"deny": False}]
+
+    def test_pre_tool_call_concurrent_timeout_stays_fail_closed(self, monkeypatch):
+        """A wedged callback gets one worker; concurrent callers do not pile up."""
+        import time
+
+        from hermes_cli.plugins import _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins._resolve_hook_callback_timeout", lambda: 0.1
+        )
+        hold = threading.Event()
+        starts = []
+
+        def hung_policy(**_kwargs):
+            starts.append(1)
+            hold.wait(timeout=10.0)
+            return None
+
+        mgr = PluginManager()
+        mgr._hooks["pre_tool_call"] = [hung_policy]
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(
+            mgr.invoke_hook("pre_tool_call", tool_name="x", args={"n": len(results)})
+        )) for _ in range(2)]
+        started = time.monotonic()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        assert len(results) == 2
+        assert results == [[{
+            "action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE
+        }]] * 2
+        assert len(starts) == 1
+        assert elapsed < 1.0
+        hold.set()
+
     def test_pre_tool_call_timeout_fail_closed(self, monkeypatch):
         """Timed-out pre_tool_call must return a block directive, not allow."""
         import time

@@ -209,14 +209,29 @@ class PluginDispatchMixin:
         token = object()
         with self._hook_timeout_lock:
             suppressed_until = self._hook_timeout_suppressed_until.get(callback_key)
-            running = callback_key in self._hook_running_callbacks
-            if (suppressed_until is not None and suppressed_until > time.monotonic()) or running:
+            if suppressed_until is not None and suppressed_until > time.monotonic():
                 logger.warning(
                     "Hook '%s' callback %s skipped after previous "
-                    "timeout or while still running", hook_name, callback_name)
+                    "timeout", hook_name, callback_name)
                 return _HOOK_SKIPPED
             if suppressed_until is not None:
                 self._hook_timeout_suppressed_until.pop(callback_key, None)
+            callback_lock = self._hook_callback_locks.setdefault(callback_key, threading.Lock())
+
+        deadline = time.monotonic() + timeout
+        if not callback_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            logger.warning(
+                "Hook '%s' callback %s skipped while previous call is still running",
+                hook_name, callback_name)
+            return _HOOK_SKIPPED
+        with self._hook_timeout_lock:
+            # A timed-out holder may have set the cooldown while this caller was waiting.
+            suppressed_until = self._hook_timeout_suppressed_until.get(callback_key)
+            if suppressed_until is not None and suppressed_until > time.monotonic():
+                callback_lock.release()
+                logger.warning(
+                    "Hook '%s' callback %s skipped after previous timeout", hook_name, callback_name)
+                return _HOOK_SKIPPED
             self._hook_running_callbacks[callback_key] = token
 
         context = contextvars.copy_context()
@@ -233,11 +248,12 @@ class PluginDispatchMixin:
                 with self._hook_timeout_lock:
                     if self._hook_running_callbacks.get(callback_key) is token:
                         self._hook_running_callbacks.pop(callback_key, None)
+                callback_lock.release()
                 done.set()
 
         thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
         thread.start()
-        if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
+        if not done.wait(timeout=max(0.0, deadline - time.monotonic())):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
                 # See #6622.
                 self._hook_timeout_suppressed_until[callback_key] = (
