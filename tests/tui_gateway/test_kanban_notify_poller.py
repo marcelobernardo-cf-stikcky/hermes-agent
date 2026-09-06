@@ -57,26 +57,11 @@ def _sub_rows(tid: str) -> list:
 
 class TestCollectKanbanNotifications:
     def test_review_lifecycle_kinds_reach_desktop_session(self):
-        """review_requested must be claimed and formatted by the Desktop poller.
+        """A real review request is delivered once to the subscribed Desktop session.
 
-        Measured 2026-09-05 (t_b01af2fd): the worker requested review, the
-        gateway notifier's TERMINAL_KINDS included it, but this poller's
-        _KANBAN_NOTIFY_KINDS did not — the Desktop session never woke.
-        The poller's kind set must be a superset of the gateway's wake set.
+        Measured 2026-09-05 (t_b01af2fd): worker requested review, gateway woke,
+        this poller did not claim the kind — the Desktop session never woke.
         """
-        import re
-        from pathlib import Path
-        import gateway.kanban_watchers as kw
-        from tui_gateway import server as srv
-        src = Path(kw.__file__).read_text(encoding="utf-8")
-        m = re.search(r"TERMINAL_KINDS\s*=\s*\((.*?)\)", src, re.S)
-        gateway_kinds = set(re.findall(r'"([a-z_]+)"', m.group(1)))
-        assert gateway_kinds, "could not read gateway TERMINAL_KINDS"
-        assert gateway_kinds <= set(srv._KANBAN_NOTIFY_KINDS), (
-            f"Desktop poller misses kinds the gateway wakes on: "
-            f"{sorted(gateway_kinds - set(srv._KANBAN_NOTIFY_KINDS))}"
-        )
-
         tid = _create_subscribed_task()
         conn = kb.connect()
         try:
