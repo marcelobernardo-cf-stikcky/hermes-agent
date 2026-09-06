@@ -266,4 +266,5 @@ class PluginLedgerMixin:
         with self._hook_timeout_lock:
             self._hook_running_callbacks.clear()
             self._hook_timeout_suppressed_until.clear()
+            self._hook_callback_locks.clear()  # id(cb) can be reused after unload; never inherit a held lock
         self._discovered = False
