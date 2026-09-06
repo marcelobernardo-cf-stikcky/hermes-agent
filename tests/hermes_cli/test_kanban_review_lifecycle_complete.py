@@ -203,6 +203,41 @@ def test_rereview_requires_explicit_reviewer_when_provenance_is_invalid(
     assert restored.assignee == "reviewer"
 
 
+def test_complete_task_allows_review_approval_with_reviewer_none(conn) -> None:
+    """``hermes_cli.kanban_db.complete_task`` itself must NOT block a
+    reviewer=None review approval — that is the legitimate human/dashboard
+    approval path (#54823) and the reopen/reclaim path with no reviewer
+    ever set (see
+    ``test_reopening_parent_retracts_review_and_blocks_approval``). The
+    agent-facing self-approval guard for #t_ae5576ac lives at the
+    ``kanban_complete`` TOOL layer instead — see
+    ``tests/tools/test_kanban_tools.py::test_complete_rejects_self_approved_review``.
+    """
+    task_id = kb.create_task(conn, title="Wake regression fix", assignee="builder")
+    implementation = kb.claim_task(conn, task_id, claimer="builder:1")
+    assert implementation is not None
+    assert kb.request_review(
+        conn,
+        task_id,
+        summary="ready for review",
+        expected_run_id=implementation.current_run_id,
+    )  # reviewer=None, no prior changes_requested provenance either
+
+    review = kb.claim_review_task(conn, task_id, claimer="builder:1")
+    assert review is not None
+
+    ok = kb.complete_task(
+        conn,
+        task_id,
+        summary="approved",
+        expected_run_id=review.current_run_id,
+    )
+    assert ok is True
+    approved = kb.get_task(conn, task_id)
+    assert approved is not None
+    assert approved.status == "done"
+
+
 def test_review_changes_reapply_parent_gate(conn):
     parent_id = kb.create_task(conn, title="Upstream prerequisite", assignee="planner")
     task_id = kb.create_task(

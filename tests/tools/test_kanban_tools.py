@@ -61,7 +61,7 @@ def worker_env(monkeypatch, tmp_path):
     kb.init_db()
     conn = kb.connect()
     try:
-        tid = kb.create_task(conn, title="worker-test", assignee="test-worker")
+        tid = kb.create_task(conn, title="worker-test", body="spec do card", assignee="test-worker")
         kb.claim_task(conn, tid)
     finally:
         conn.close()
@@ -71,13 +71,14 @@ def worker_env(monkeypatch, tmp_path):
 
 def test_show_defaults_to_env_task_id(worker_env):
     from tools import kanban_tools as kt
+    kt._OWN_CARD_READ.add(worker_env)  # simulate the first (full) read already served
     out = kt._handle_show({})
     d = json.loads(out)
     assert "task" in d
     assert d["task"]["id"] == worker_env
     assert d["task"]["status"] == "running"
-    # Worker re-reading its OWN card gets the lean delta view: no body,
-    # no worker_context, no event log (all already in its first turn).
+    # Worker RE-reading its OWN card gets the lean delta view: no body,
+    # no worker_context, no event log (all served on the first read).
     assert "worker_context" not in d
     assert "events" not in d
     assert "body" not in d["task"]
@@ -89,13 +90,18 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert _detect_tool_failure("kanban_show", out) == (False, "")
 
 
-def test_show_lean_for_own_card_full_for_others(worker_env, monkeypatch):
-    """The lean view applies only to the worker's own card; any other task
-    (orchestrator reading, or a worker peeking at a sibling) keeps the full
-    payload. Mutation check: unset HERMES_KANBAN_TASK -> full view again."""
+def test_show_full_first_then_lean_for_own_card_full_for_others(worker_env, monkeypatch):
+    """A worker's prompt is only "work kanban task <id>": the FIRST own-card
+    read must carry body + worker_context (starving it timed out rigger twice,
+    t_5a37e0eb / t_2ba1b862). Re-reads are lean. Any other task (orchestrator,
+    sibling peek) keeps the full payload. Mutation check: unset
+    HERMES_KANBAN_TASK -> full view again."""
     from tools import kanban_tools as kt
+    kt._OWN_CARD_READ.discard(worker_env)
+    first = json.loads(kt._handle_show({"task_id": worker_env}))
+    assert "worker_context" in first and first["task"]["body"]
     lean = json.loads(kt._handle_show({"task_id": worker_env}))
-    assert "worker_context" not in lean
+    assert "worker_context" not in lean and "body" not in lean["task"]
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     full = json.loads(kt._handle_show({"task_id": worker_env}))
     assert "worker_context" in full and "events" in full and "runs" in full

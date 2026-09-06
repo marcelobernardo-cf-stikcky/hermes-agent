@@ -5456,7 +5456,8 @@ def complete_task(
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True,
-) -> bool:
+    with_reason: bool = False,
+):
     """Transition ``running|ready|blocked|review -> done`` and record ``result``.
 
     Accepts a task that is merely ``ready`` too, so a manual CLI
@@ -5488,12 +5489,23 @@ def complete_task(
     Any suspected phantom references are recorded as a
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
+
+    With ``with_reason=True`` returns ``(ok, reason)``; ``reason`` is
+    ``None`` on success. (The reviewer-distinct-from-implementer check for
+    the ``kanban_complete`` agent tool lives at the tool layer —
+    :func:`tools.kanban_tools._reject_self_approved_review`, called from
+    :func:`tools.kanban_tools._handle_complete` before this function — so
+    it applies only to agent-driven completions, never to human/dashboard/
+    CLI callers of ``complete_task`` itself. See #t_ae5576ac.)
     """
+    def _ret(ok: bool, reason: Optional[str] = None):
+        return (ok, reason) if with_reason else ok
+
     now = int(time.time())
     # Fail before validating cards or staging artifacts; re-check inside the
     # final write transaction below to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
-        return False
+        return _ret(False, "parent dependencies are not satisfied")
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
@@ -5530,7 +5542,7 @@ def complete_task(
         # approval. A parent may have been reopened after this task entered
         # ``review`` or ``running``.
         if not _parents_satisfied(conn, task_id):
-            return False
+            return _ret(False, "parent dependencies are not satisfied")
         prior = conn.execute(
             "SELECT status FROM tasks WHERE id = ?",
             (task_id,),
@@ -5572,7 +5584,7 @@ def complete_task(
                 (result, now, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
-            return False
+            return _ret(False, "unknown id or already terminal")
         if isinstance(metadata, dict):
             _persist_scratch_completion_artifacts(conn, task_id, metadata)
             for stored_path in metadata.pop("_staged_artifacts", []):
@@ -5686,7 +5698,7 @@ def complete_task(
             run_id=run_id,
             summary=(summary if summary is not None else result),
         )
-    return True
+    return _ret(True)
 
 
 # ---------------------------------------------------------------------------

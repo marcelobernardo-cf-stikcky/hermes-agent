@@ -596,6 +596,11 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
 # Handlers
 # ---------------------------------------------------------------------------
 
+# Own-card ids already served in full to this worker process (one-shot
+# process, so a module set is the whole lifetime).
+_OWN_CARD_READ: set = set()
+
+
 def _handle_show(args: dict, **kw) -> str:
     """Read a task's full state: task row, parents, children, comments,
     runs (attempt history), and the last N events."""
@@ -646,12 +651,14 @@ def _handle_show(args: dict, **kw) -> str:
                 {"author": c.author, "body": c.body, "created_at": c.created_at}
                 for c in comments
             ]
-            # A dispatcher worker re-reading ITS OWN card already holds the
-            # body + worker_context in its first user turn (build_worker_context
-            # at spawn). Re-sending them measured 29 KB/call, 2x per run, on
-            # every profile (2026-09-05, t_3d0deed0). Return only the delta a
-            # worker can act on: status, recent comments, and the latest run.
-            if os.environ.get("HERMES_KANBAN_TASK") == tid:
+            # A dispatcher worker's prompt is only "work kanban task <id>"
+            # (kanban_db.spawn_worker); the body reaches it through THIS call.
+            # Re-sending body + worker_context on every re-read measured
+            # 29 KB/call, 2x per run (2026-09-05, t_3d0deed0), so the FIRST
+            # own-card read is full and later ones return only the delta a
+            # worker can act on. Getting this wrong the other way starved
+            # rigger of its spec (t_5a37e0eb, t_2ba1b862: 2 runs timed out).
+            if os.environ.get("HERMES_KANBAN_TASK") == tid and tid in _OWN_CARD_READ:
                 t = task
                 latest = _run_dict(runs[-1]) if runs else None
                 # Drop null keys: the display-layer failure heuristic
@@ -671,10 +678,11 @@ def _handle_show(args: dict, **kw) -> str:
                     "comments": comment_dicts[-3:],
                     "latest_run": latest,
                     "note": (
-                        "worker view: body and handoffs are already in your first "
-                        "message; only the last 3 comments and latest run are shown."
+                        "worker view: body and handoffs were in your first "
+                        "kanban_show; only the last 3 comments and latest run are shown."
                     ),
                 })
+            _OWN_CARD_READ.add(tid)
 
             return json.dumps({
                 "task": _task_dict(task),
