@@ -1377,7 +1377,7 @@ def start() -> None:
 
     # A persistent login mechanism owns the VBS supervisor. Manual starts must
     # use the same owner so a crash is recovered during the current session too.
-    if task_installed or startup_installed:
+    if is_task_registered() or is_startup_entry_installed():
         pid = _spawn_supervised()
         _report_gateway_start(f"VBS supervisor (PID {pid})")
     else:
