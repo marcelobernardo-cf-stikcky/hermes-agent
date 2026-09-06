@@ -268,6 +268,19 @@ class TestFormatKanbanEventText:
             ev = SimpleNamespace(kind=kind, payload={})
             assert _format_kanban_event_text(self.SUB, self.TASK, ev, "main") is None
 
+    def test_every_gateway_wake_kind_renders_for_desktop(self):
+        """Any kind that hands a decision back to the origin in the gateway must also wake Desktop.
+
+        Measured 2026-09-05: review_requested woke Telegram but not Desktop. Contract: the
+        gateway's wake set is the Desktop's, and each renders a non-empty, task-tagged line.
+        """
+        from gateway.kanban_watchers_notifier import _WAKE_KINDS
+        for kind in _WAKE_KINDS:
+            ev = SimpleNamespace(kind=kind, payload={"reason": "r", "summary": "s", "reviewer": "default",
+                                                     "recurrences": 3, "limit_seconds": 60})
+            text = _format_kanban_event_text(self.SUB, self.TASK, ev, "main")
+            assert text and "t_abc123" in text, (kind, text)
+
     def test_blocked_includes_reason(self):
         ev = SimpleNamespace(kind="blocked", payload={"reason": "needs creds"})
         text = _format_kanban_event_text(self.SUB, self.TASK, ev, "main")

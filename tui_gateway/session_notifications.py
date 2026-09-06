@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 
+from gateway.kanban_watchers_notifier import TERMINAL_KINDS as _KANBAN_NOTIFY_KINDS
 from .method_ctx import bind_module
 
 
@@ -109,9 +110,8 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
     return (evt.get("session_id", ""), evt_type, *(evt.get(f, 0 if f == "suppressed" else "") for f in extra))
 
 
-# Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so the cursor advances
-# past them and they can't wedge a later completed/blocked event behind an unclaimed row.
-_KANBAN_NOTIFY_KINDS = ("completed", "review_requested", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
+# _KANBAN_NOTIFY_KINDS is the gateway notifier's TERMINAL_KINDS (one source of truth): silent kinds (archived/
+# unblocked) are claimed too so the cursor advances past them and can't wedge a later event behind an unclaimed row.
 _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
 
 
@@ -226,6 +226,12 @@ _KANBAN_EVENT_FORMATTERS = {
     "review_requested": ("👀", lambda t, p, title: f" ready for review — {title}"
                          + (f" → @{p['reviewer']}" if p.get("reviewer") else "")
                          + (_kb_first_line(p["summary"], 200) if p.get("summary") else "")),
+    "changes_requested": ("↩", lambda t, p, title: f" changes requested — {title}"
+                          + (f" by @{p['reviewer']}" if p.get("reviewer") else "")
+                          + (f": {str(p['reason'])[:160]}" if p.get("reason") else "")),
+    "block_loop_detected": ("🛑", lambda t, p, title: f" routed to TRIAGE — {title}"
+                            + (f" (blocked {p['recurrences']}x for the same cause)" if p.get("recurrences") else "")
+                            + (f": {str(p['reason'])[:160]}" if p.get("reason") else "")),
     "blocked": ("⏸", lambda t, p, title: " blocked" + (f": {str(p.get('reason'))[:160]}" if p.get("reason") else "")),
     "gave_up": ("✖", lambda t, p, title: " gave up after repeated spawn failures"
                 + (f"\n{str(p.get('error'))[:200]}" if p.get("error") else "")),
