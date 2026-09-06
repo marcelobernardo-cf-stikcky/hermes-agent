@@ -125,6 +125,72 @@ def test_deliver_wake_retries_429_then_succeeds(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_deliver_wake_logs_at_start_not_only_completion(caplog):
+    """The self-post must log BEFORE the HTTP call resolves — a hung/slow
+    wake turn was previously invisible until it finished (#t_ae5576ac:
+    POST at 18:07, log only at 18:10)."""
+    import logging
+
+    from aiohttp import web
+
+    async def handler(request):
+        await request.json()
+        return web.json_response({"choices": []})
+
+    async def run():
+        runner, port = await _serve(handler)
+        try:
+            adapter = ApiServerLikeAdapter(port=port)
+            with caplog.at_level(logging.INFO, logger="gateway.wake"):
+                await deliver_wake(adapter, text="x", session_id="sid-start")
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+    messages = [r.getMessage() for r in caplog.records]
+    start_idx = next(
+        i for i, m in enumerate(messages) if "starting" in m and "sid-start" in m
+    )
+    done_idx = next(
+        i for i, m in enumerate(messages) if "delivered" in m and "sid-start" in m
+    )
+    assert start_idx < done_idx
+
+
+def test_deliver_wake_serializes_concurrent_self_posts_per_session():
+    """Two concurrent wake self-posts on the SAME session_id must not race
+    on the wire — Desktop/grok and the wake api_server competing produced
+    interleaved replies (#t_ae5576ac). The second call waits, it never
+    fires while the first is in flight."""
+    from aiohttp import web
+
+    import gateway.wake as wake_mod
+
+    concurrent = {"n": 0, "max": 0}
+
+    async def handler(request):
+        concurrent["n"] += 1
+        concurrent["max"] = max(concurrent["max"], concurrent["n"])
+        await asyncio.sleep(0.05)
+        concurrent["n"] -= 1
+        return web.json_response({"choices": []})
+
+    async def run():
+        runner, port = await _serve(handler)
+        try:
+            adapter = ApiServerLikeAdapter(port=port)
+            await asyncio.gather(
+                deliver_wake(adapter, text="a", session_id="sid-shared"),
+                deliver_wake(adapter, text="b", session_id="sid-shared"),
+            )
+        finally:
+            await runner.cleanup()
+            wake_mod._SESSION_LOCKS.pop("sid-shared", None)
+
+    asyncio.run(run())
+    assert concurrent["max"] == 1
+
+
 def test_persist_delegation_delivery_appends_delivery_row(tmp_path):
     """#85957: the delegation completion lands in the session transcript as a
     display_kind=async_delegation_complete delivery row (real SessionDB), and

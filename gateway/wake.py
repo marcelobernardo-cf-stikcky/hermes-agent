@@ -53,6 +53,27 @@ WAKE_TURN_TIMEOUT_SECONDS = 600.0
 # max_concurrent_runs cap via HTTP 429, which is worth waiting out.
 _RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
 
+# One in-flight wake self-post per session_id (#t_ae5576ac): two notifier
+# ticks (or a wake-only sub plus a notify+wake sub) racing the SAME session
+# would otherwise both POST /v1/chat/completions concurrently and interleave
+# replies in the transcript. A lock per session_id serializes them — the
+# second self-post simply waits for the first to finish instead of racing it.
+# ponytail: process-local only (not shared across gateway processes); a
+# second gateway process racing the same session still interleaves — add a
+# cross-process file lock (mirroring hermes_cli.active_sessions) if that
+# topology becomes real.
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _get_session_lock(session_id: str) -> asyncio.Lock:
+    """Return the process-wide wake lock for ``session_id``, creating it once.
+
+    Safe without an extra guard lock: asyncio is single-threaded and
+    ``dict.setdefault`` has no ``await`` between check and insert, so two
+    callers on the same loop can't race the creation.
+    """
+    return _SESSION_LOCKS.setdefault(session_id, asyncio.Lock())
+
 
 def adapter_supports_push(adapter: Any) -> bool:
     """Whether this adapter can push a message to the user after a turn ends.
@@ -193,6 +214,17 @@ async def _self_post_chat_completion(
     raise loudly rather than run the wake in a fresh fingerprint-derived
     session nobody is looking at.
     """
+    async with _get_session_lock(session_id):
+        await _self_post_chat_completion_locked(adapter, text=text, session_id=session_id)
+
+
+async def _self_post_chat_completion_locked(
+    adapter: Any, *, text: str, session_id: str
+) -> None:
+    """Do the actual self-post. Only ever runs one-at-a-time per session_id
+    (see ``_get_session_lock``) — the caller holds that lock for the whole
+    call, retries included.
+    """
     import aiohttp
 
     host = str(getattr(adapter, "_host", "") or "127.0.0.1")
@@ -220,6 +252,8 @@ async def _self_post_chat_completion(
         "messages": [{"role": "user", "content": text}],
         "stream": False,
     }
+
+    logger.info("wake self-post starting for session %s", session_id)
 
     last_err: Optional[BaseException] = None
     attempts = 1 + len(_RETRY_DELAYS_SECONDS)
