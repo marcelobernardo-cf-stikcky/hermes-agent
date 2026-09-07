@@ -1078,7 +1078,9 @@ def _record_task_failure(
             "trigger_outcome": outcome,
             "retry_status": retry_status,
         }
-        run_id = None
+        # Keep the run identity when the breaker follows a timeout/crash whose
+        # run was already closed; notifier uses it to discard stale wakes.
+        run_id = _kb._current_run_id(conn, task_id)
         if end_run:
             # Only the spawn path has an open run to close.
             run_id = _kb._end_run(

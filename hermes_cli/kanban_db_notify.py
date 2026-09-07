@@ -332,7 +332,17 @@ def unseen_events_for_sub(
     if kind_list:
         params.extend(kind_list)
     rows = conn.execute(q, params).fetchall()
-    out = [_kb.Event.from_row(r) for r in rows]
+    current = conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    current_run_id = _kb._opt_int(current["current_run_id"]) if current else None
+    out = [
+        _kb.Event.from_row(r)
+        for r in rows
+        if current_run_id is None
+        or _kb._row_get(r, "run_id") is None
+        or int(r["run_id"]) >= current_run_id
+    ]
     max_id = max([cursor, *(int(r["id"]) for r in rows)])
     return max_id, out
 
