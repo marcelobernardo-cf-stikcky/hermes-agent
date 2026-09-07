@@ -91,16 +91,33 @@ def _native_binary_candidates(base: Path) -> list[Path]:
     return list(cands.values())
 
 
+def _usable_binary(path: Path) -> bool:
+    """Reject POSIX shebang shims on Windows; native binaries and wrappers pass."""
+    if not path.exists():
+        return False
+    if not _is_windows():
+        return True
+    try:
+        with path.open("rb") as stream:
+            return not stream.read(2) == b"#!"
+    except OSError:
+        return False
+
+
 def _first_existing(*bases: Path) -> Optional[Path]:
     """First platform-native candidate of any ``base`` that exists on disk."""
-    return next((c for base in bases for c in _native_binary_candidates(base) if c.exists()), None)
+    return next((c for base in bases for c in _native_binary_candidates(base) if _usable_binary(c)), None)
 
 
 def _existing_binary(name: str) -> Optional[str]:
     """Probe the staging dir + PATH for a binary named ``name``."""
-    for staged in _native_binary_candidates(hermes_lsp_bin_dir() / name):
-        if staged.exists() and os.access(staged, os.X_OK):
-            return str(staged)
+    bases = [hermes_lsp_bin_dir() / name]
+    if _is_windows():
+        bases.append(hermes_lsp_bin_dir().parent / "node_modules" / ".bin" / name)
+    for base in bases:
+        for staged in _native_binary_candidates(base):
+            if _usable_binary(staged) and os.access(staged, os.X_OK):
+                return str(staged)
     suffixes = ("", *_WINDOWS_WRAPPER_SUFFIXES) if _is_windows() else ("",)
     return next((p for s in suffixes if (p := shutil.which(f"{name}{s}"))), None)
 
@@ -159,6 +176,9 @@ def _run_installer(tool: str, pkg: str, cmd: list, *, timeout: int, env: Optiona
 
 def _link_into_bin(target: Path) -> str:
     """Symlink (or copy, where symlinks fail) ``target`` into ``lsp/bin/`` and return the path to use."""
+    if _is_windows() and target.suffix.lower() in {".cmd", ".bat"}:
+        # npm wrappers resolve their payload relative to node_modules/.bin.
+        return str(target)
     link = hermes_lsp_bin_dir() / target.name
     if not link.exists():
         try:
