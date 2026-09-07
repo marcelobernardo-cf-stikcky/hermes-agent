@@ -419,6 +419,50 @@ def _secure_snapshot(path: str, *, contents: bool = False) -> None:
 _SQLITE_AUTH_DBS = frozenset({"Cookies", "Login Data", "Login Data For Account", "Web Data"})
 
 
+# `Connection.backup()` RETRIES FOREVER on SQLITE_BUSY: CPython loops
+# `sqlite3_backup_step` + `sqlite3_sleep` while the result is OK/BUSY/LOCKED, and
+# no argument bounds that loop — `sqlite3.connect(timeout=)` covers only the
+# initial lock negotiation. So a contended DESTINATION hangs the snapshot with no
+# way out except the `progress` callback, which runs once per step: raising from
+# it is the ONLY place a deadline can land. This is the class behind the 420s
+# `browser_exec` incidents (faulthandler pinned `_copy_auth_file` while
+# `timeout_s=20`). Measured: the same source DB copies in 0.00s to a FRESH
+# destination and hangs indefinitely against the live copy dir.
+_BACKUP_PAGES_PER_STEP = 256
+# Per-file, and deliberately small: `_mirror_profile_auth` copies 4 SQLite DBs, so
+# this is spent up to 4x per snapshot. The `shutil.copy2` fallback right below
+# handles a contended DB in ~0.00s (measured), so waiting longer buys nothing —
+# it only delays a path that already works.
+_BACKUP_BUDGET_S = 2.5
+# Busy timeout for the DESTINATION handle. `_profile_is_locked` probes the SOURCE
+# before the snapshot, but nothing bounded the destination: when an automation
+# Chrome is still live on the copy dir it holds those DBs, and `backup()` blocks
+# acquiring the destination write lock BEFORE its first step — so the `progress`
+# callback never runs and no source-side guard can fire. Measured with 5 live
+# Chrome PIDs on the copy dir: `begin immediate` on the destination blocked on
+# Network/Cookies and Web Data, while every SOURCE db copied in <=0.02s.
+# Bounding this handle turns a multi-minute hang into a fast, fail-closed error.
+_DST_LOCK_TIMEOUT_S = 2.0
+
+
+def _backup_deadline_guard(budget_s: float = _BACKUP_BUDGET_S):
+    """`progress` callback for `Connection.backup` that aborts past *budget_s*.
+
+    Raising inside the callback propagates out of `backup()`, so the caller's
+    existing `except Exception` falls through to the plain-copy path instead of
+    hanging. A copy that cannot finish in the budget is a contended DB, and the
+    raw copy (or a missing single auth file) is the right answer there.
+    """
+    deadline = time.monotonic() + budget_s
+
+    def _progress(status: int, remaining: int, total: int) -> None:
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"sqlite backup exceeded {budget_s:.0f}s ({remaining}/{total} pages left)")
+
+    return _progress
+
+
 def _copy_auth_file(src_file: str, dst_file: str) -> bool:
     """Copy one auth file, lock-aware; True on success. SQLite DBs use the online-backup API (works
     under a Windows write lock), falling through to a raw copy; failure only if BOTH fail."""
@@ -432,8 +476,10 @@ def _copy_auth_file(src_file: str, dst_file: str) -> bool:
             try:
                 # Short busy timeout so a truly wedged DB fails fast rather than hanging.
                 with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as source:
-                    with contextlib.closing(sqlite3.connect(dst_file)) as out, out:
-                        source.backup(out)
+                    with contextlib.closing(
+                            sqlite3.connect(dst_file, timeout=_DST_LOCK_TIMEOUT_S)) as out, out:
+                        source.backup(out, pages=_BACKUP_PAGES_PER_STEP,
+                                      progress=_backup_deadline_guard())
                 return True
             except Exception as e:
                 logger.debug("real-profile: sqlite-backup of %s failed (%s); trying next mode",
@@ -458,6 +504,37 @@ def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
 
 
 _SNAPSHOT_DONE_MARKER = ".hermes-snapshot-complete"
+
+
+def _close_copy_dir_browser(copy_dir: str) -> int:
+    """Terminate browser processes holding Hermes' own snapshot ``copy_dir``; count killed.
+
+    NOT the consented path: ``copy_dir`` is Hermes-created scratch (recreated on the next
+    launch), never the user's profile, so there is no human state to lose. Best-effort —
+    a failure here just leaves the caller's existing locked-DB error to fire.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    gone = (psutil.NoSuchProcess, psutil.AccessDenied)
+    targets: list = []
+    for p in _processes_holding_profile(copy_dir):
+        targets.append(p)
+        with contextlib.suppress(*gone):
+            targets.extend(p.children(recursive=True))
+    if not targets:
+        return 0
+    for p in targets:
+        with contextlib.suppress(*gone):
+            p.terminate()
+    alive = psutil.wait_procs(targets, timeout=5.0)[1]
+    for p in alive:
+        with contextlib.suppress(*gone):
+            p.kill()
+    psutil.wait_procs(alive, timeout=3.0)
+    logger.debug("real-profile: closed %d process(es) holding the copy dir", len(targets))
+    return len(targets)
 # Prefix stamped on the "profile is locked" error so the calling layer can recognize the
 # needs-the-browser-closed condition and surface the close-with-approval flow.
 _PROFILE_LOCKED_PREFIX = "[profile-locked] "
@@ -684,6 +761,14 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         _sync_local_state(src, dst, source_profile)
         if not populated:
             _copy_profile_tree(src, dst, source_profile)
+        # Reap any browser still holding the COPY dir before overwriting its auth DBs.
+        # `_terminate_real_profile_chrome` only knows procs THIS process launched, so a
+        # copy-dir Chrome orphaned by an earlier hermes run survives it — and then
+        # `backup()` contends with it (it retries forever on SQLITE_BUSY: the class
+        # behind the 420s `browser_exec` hangs). Discovering owners by data-dir is the
+        # only way to catch orphans. Scoped to `dst`, which is Hermes' own snapshot
+        # copy, so the user's real browser is never touched.
+        _close_copy_dir_browser(dst)
         # Both paths: lock-aware auth DB copy into Default — also the per-launch re-sync.
         failed_dbs = _mirror_profile_auth(src, dst, source_profile)
         if failed_dbs:  # even online-backup failed: never launch a silently signed-out session

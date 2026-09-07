@@ -455,7 +455,7 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     return err
 
 
-def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
+def _resolve_real_profile_cdp(env: dict, force_local: bool, deadline: Optional[float] = None) -> Optional[str]:
     """Point the harness at the user's real-profile copy-browser (a SNAPSHOT of their default Chromium
     profile, hermes_cli.browser_connect) when consented. Two ways in: the effective backend is already local
     (no provider, CDP override, or legacy BU cloud config) → silent upgrade; or ``force_local`` (consent-gated
@@ -478,18 +478,24 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
     if not force_local and (_quiet(_get_cloud_provider, object()) is not None
                             or is_legacy_browser_use_cloud_config(_read_browser_cfg())):
         return None
-    cdp, err = _real_profile_cdp()
+    cdp, err = _real_profile_cdp(deadline=deadline)
     if cdp and not err:
         _set_cdp_env(env, cdp)
     return err or None
 
 
-def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool) -> Optional[str]:
+def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool,
+                   deadline: Optional[float] = None) -> Optional[str]:
     """Resolve where the harness connects; returns an error string or None. Real-profile consent runs
     BEFORE provider resolution so a hit short-circuits the cloud path via the BU_CDP_* env contract. Named
     sessions compose with the backend: BU_NAME namespaces the harness daemon (IPC socket, log, pid) and on
-    provider backends additionally keys its own cloud browser."""
-    rp_err = _resolve_real_profile_cdp(env, force_local=local)
+    provider backends additionally keys its own cloud browser.
+
+    ``deadline`` (a ``time.monotonic()`` budget set by ``browser_exec`` BEFORE this call) covers the whole
+    real-profile setup chain — stale-session close, snapshot, launch, attach — not just the final CLI
+    subprocess; each blocking step fails closed once it is exceeded instead of running unbounded (#94500).
+    """
+    rp_err = _resolve_real_profile_cdp(env, force_local=local, deadline=deadline)
     if rp_err:
         return rp_err
     # local=True is only served by the real-profile route; consent off must not pretend.
@@ -539,7 +545,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
                               "dashes, or underscores (e.g. 'r7k2').")
         env["BU_NAME"] = session
-    route_err = _route_backend(env, session, task_id, bool(local))
+    # Deadline covers setup (real-profile stale-session close / snapshot / launch / attach) as well as
+    # the CLI subprocess below — timeout_s used to bound only the final subprocess.run, so a slow real-profile
+    # setup on the SAME call could add unbounded extra wall-clock on top of it (#94500).
+    timeout = _clamp_timeout(timeout_s)
+    deadline = time.monotonic() + timeout
+    route_err = _route_backend(env, session, task_id, bool(local), deadline=deadline)
     if route_err:
         return tool_error(route_err)
 
@@ -558,15 +569,18 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
         env["BU_AUTOSPAWN"] = "1"
 
-    timeout = _clamp_timeout(timeout_s)
+    # Remaining budget after setup — floor at _MIN_TIMEOUT_S so a slow-but-successful setup still gets a
+    # workable CLI call instead of an instant, confusing timeout.
+    remaining = max(_MIN_TIMEOUT_S, deadline - time.monotonic())
     started = time.time()
     try:
         proc = subprocess.run(
-            cmd, input=code, capture_output=True, text=True, timeout=timeout, env=env,
+            cmd, input=code, capture_output=True, text=True, timeout=remaining, env=env,
             **_windows_popen_kwargs(),
         )
     except subprocess.TimeoutExpired:
-        return tool_error(f"browser-use exec timed out after {timeout}s. The daemon may still be working; retry "
+        return tool_error(f"browser-use exec timed out after {timeout}s (setup used "
+                          f"{timeout - remaining:.1f}s of that budget). The daemon may still be working; retry "
                           f"with a larger timeout_s (max {_MAX_TIMEOUT_S}), or split the work into several calls that "
                           "append to workspace files — anything already written to the workspace is preserved.")
     except OSError as e:

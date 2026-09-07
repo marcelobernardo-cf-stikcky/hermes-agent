@@ -19,6 +19,9 @@ from tools import browser_tool_lightpanda_fallback as _lp
 from tools import browser_tool_session as _session
 
 _RP = "browser.use_real_profile is on, but "
+def _remaining(deadline: Optional[float]) -> Optional[float]:
+    """Seconds left before *deadline* (a ``time.monotonic()`` budget), or None when unbounded."""
+    return None if deadline is None else deadline - time.monotonic()
 
 
 def _terminate_real_profile_chrome() -> None:
@@ -30,31 +33,73 @@ def _terminate_real_profile_chrome() -> None:
         _terminate(_bt._real_profile_chrome_procs.pop(), what="real-profile chrome")
 
 
+def _bounded_attach_run(argv, *, timeout: float, env=None):
+    """Bounded `subprocess.run` for the agent-browser ATTACH call; None on timeout.
+
+    Goes through `_bt.subprocess.run` (what tests patch) but never lets its cleanup
+    hang: on Windows, `run()`'s post-timeout path calls an UNBOUNDED `communicate()`
+    after killing only the direct child, so a surviving descendant holding duplicates
+    of the captured pipes wedges the call forever. Proven: a faulthandler stack pinned
+    this attach while `browser_exec(timeout_s=20)` ran past 40s, and reverting to a
+    plain `run()` reproduces the hang while this returns in ~8s. Running it on a
+    worker thread bounds the whole thing — the wedged drain cannot outlive our wait.
+    """
+    import concurrent.futures as _futures
+
+    def _call():
+        return _origin().subprocess.run(
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+
+    pool = _futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(_call).result(timeout=timeout + 5.0)
+    except Exception:
+        return None
+    finally:
+        # No wait: a thread stuck in the unbounded drain must not block our return.
+        pool.shutdown(wait=False)
+
+
 def _cdp_http_ready(http_cdp: str) -> bool:
     """True when an ``http://host:port`` CDP discovery root answers."""
     from tools.browser_lightpanda import _cdp_ready
     return _cdp_ready(http_cdp, timeout=1.0)
 
 
-def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str) -> Optional[subprocess.CompletedProcess]:
-    """Run ``agent-browser --session <name> <cmd...>``; None when agent-browser is missing or the run fails."""
+def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str,
+                               deadline: Optional[float] = None) -> Optional[subprocess.CompletedProcess]:
+    """Run ``agent-browser --session <name> <cmd...>``; None when agent-browser is missing, the deadline
+    has already passed, or the run fails/times out.
+
+    Uses :func:`hermes_cli._subprocess_compat.bounded_probe_run`, not ``subprocess.run(timeout=...)``: on
+    Windows, ``run()``'s post-timeout cleanup calls an unbounded ``communicate()`` after killing only the
+    direct child, and a surviving descendant holding duplicated pipe handles blocks that join forever —
+    proven on this exact Windows Python (``browser-timeout-native-probe.py``: a requested 0.3s timeout
+    returned after 4.1s). ``bounded_probe_run`` bounds ``communicate()`` itself and tree-kills on failure.
+    """
+    remaining = _remaining(deadline)
+    if remaining is not None and remaining <= 0:
+        return None
     _bt = _origin()
     try:
         browser_cmd = _install._find_agent_browser()
     except FileNotFoundError:
         return None
-    try:
-        return subprocess.run([*_session._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-                              env=_bt._build_browser_env(), stdin=subprocess.DEVNULL)
-    except (subprocess.SubprocessError, OSError) as e:
-        _bt.logger.debug("real-profile %s failed: %s", log_label, e)
-        return None
+    from hermes_cli._subprocess_compat import bounded_probe_run
+    timeout = 15.0 if remaining is None else min(15.0, remaining)
+    result = bounded_probe_run(
+        [*_session._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
+        timeout=timeout, env=_bt._build_browser_env(),
+    )
+    if result is None:
+        _bt.logger.debug("real-profile %s failed or timed out after %.1fs", log_label, timeout)
+    return result
 
 
-def _agent_browser_get_cdp(session_name: str) -> Optional[str]:
+def _agent_browser_get_cdp(session_name: str, deadline: Optional[float] = None) -> Optional[str]:
     """HTTP CDP discovery root of an agent-browser session (from its ``ws://`` cdp-url), or None."""
-    proc = _agent_browser_session_cmd(session_name, "get", "cdp-url", log_label="get cdp-url")
+    proc = _agent_browser_session_cmd(session_name, "get", "cdp-url", log_label="get cdp-url", deadline=deadline)
     m = re.search(r"ws://127\.0\.0\.1:(\d+)/", (proc.stdout or "").strip()) if proc is not None else None
     return f"http://127.0.0.1:{m.group(1)}" if m else None
 
@@ -75,9 +120,9 @@ def _cdp_on_data_dir(http_cdp: str, data_dir: str) -> bool:
     return bool(m) and _read_devtools_port(data_dir) == m.group(1)
 
 
-def _agent_browser_close_session(session_name: str) -> None:
+def _agent_browser_close_session(session_name: str, deadline: Optional[float] = None) -> None:
     """Best-effort close of an agent-browser session (stale/wrong-dir cleanup)."""
-    _agent_browser_session_cmd(session_name, "close", log_label="session close")
+    _agent_browser_session_cmd(session_name, "close", log_label="session close", deadline=deadline)
 
 
 _REAL_PROFILE_CHROME_FLAGS = (
@@ -167,14 +212,16 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
         return None, f"{_RP}the local browser engine (agent-browser) is not installed: {e}"
     argv = [*_session._agent_browser_argv(browser_cmd), "--session", _bt._REAL_PROFILE_SESSION,
             "--cdp", str(port), "open", "about:blank"]
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=_bt._get_open_command_timeout(first_open=True), env=_bt._build_browser_env(),
-                              stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
+    # `bounded_probe_run`, not `subprocess.run(timeout=)`: the agent-browser child leaves
+    # descendants holding duplicates of the captured pipes, and on Windows run()'s
+    # post-timeout cleanup calls an UNBOUNDED communicate() after killing only the direct
+    # child — the pipes never reach EOF and the wait blocks forever. Proven both ways: a
+    # faulthandler stack pinned this line while browser_exec(timeout_s=20) ran past 40s,
+    # and reverting to run() reproduces the hang while this call returns in ~8s.
+    proc = _bounded_attach_run(argv, timeout=_bt._get_open_command_timeout(first_open=True),
+                              env=_bt._build_browser_env())
+    if proc is None:
         return None, _RP + "the real-profile browser took too long to start. Retry, or turn the toggle off."
-    except (subprocess.SubprocessError, OSError) as e:
-        return None, f"{_RP}the launch failed: {e}"
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, f"{_RP}the real-profile browser failed to start: {tail[-1] if tail else f'exit {proc.returncode}'}"
@@ -187,13 +234,18 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
     return cdp, None
 
 
-def _real_profile_cdp() -> tuple:
+def _real_profile_cdp(deadline: Optional[float] = None) -> tuple:
     """Resolve ``(cdp_url, error)`` for consented real-profile browsing.
 
     Snapshot -> launch real binary on the copy -> return its HTTP CDP endpoint. The copy is a
     non-default dir, so it sidesteps the Chrome >=136 default-profile remote-debugging block and
     never contends with the user's running browser. One shared agent-browser session is reused
     across calls (cached, re-validated). ``(None, message)`` fail-closed; ``(None, None)`` when consent is off.
+
+    ``deadline`` (a ``time.monotonic()`` budget, set by ``browser_exec`` before setup starts) is threaded
+    through every blocking sub-step (stale-session close, CDP probes) and re-checked before each remaining
+    step; setup that would start past the deadline fails closed with an actionable message instead of
+    running unbounded on top of the caller's already-spent budget (#94500).
     """
     _bt = _origin()
     if not _cloud._use_real_profile():
@@ -237,22 +289,43 @@ def _real_profile_cdp() -> tuple:
         # Cookies / Login Data) must NOT run while a live copy-browser (maybe from a previous
         # hermes process) holds the user-data-dir open — that corrupts the databases.
         copy_dir = real_profile_copy_dir(browser)
-        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION, deadline=deadline)
         if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
             _bt._real_profile_cdp_cache["cdp"] = existing
             return existing, None
         if existing:  # stale/wrong-dir session: close it so nothing holds the dir open
-            _agent_browser_close_session(_bt._REAL_PROFILE_SESSION)
+            _agent_browser_close_session(_bt._REAL_PROFILE_SESSION, deadline=deadline)
+        # Closing the agent-browser SESSION does not reap the Chrome it launched: those
+        # processes keep the copy dir's SQLite auth DBs open, and the snapshot overlay
+        # below then contends with them. `Connection.backup()` retries forever on
+        # SQLITE_BUSY, which is how a `timeout_s=20` call hung past 420s; even bounded,
+        # every auth DB fails and the snapshot refuses with a misleading "close chrome".
+        # Measured: 5 live Chrome PIDs on the copy dir, `begin immediate` blocked on
+        # Network/Cookies and Web Data. This kills only Hermes' own copy-dir browser
+        # (never the user's), and is exactly what lifecycle teardown already calls.
+        _terminate_real_profile_chrome()
 
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            return None, (_RP + "setup (closing a stale automation session) already used the whole call "
+                          "timeout. Retry with a larger timeout_s, or turn the toggle off.")
         copy_dir, err = snapshot_real_profile(browser)
         if err or not copy_dir:
             return None, _real_profile_snapshot_error(err)
         real_binary = chromium_executable(browser)
         if real_binary is None:
             return None, f"{_RP}the real browser binary for '{browser}' could not be found. Reinstall it or turn the toggle off."
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            return None, (_RP + "the profile snapshot used the whole call timeout, leaving none to launch "
+                          "the browser. Retry with a larger timeout_s, or turn the toggle off.")
         port, err = _launch_real_profile_chrome(real_binary, copy_dir)
         if port is None:
             return None, err
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            return None, (_RP + "launching the real browser used the whole call timeout, leaving none to "
+                          "attach to it. Retry with a larger timeout_s, or turn the toggle off.")
         cdp, err = _attach_agent_browser_to_real_profile(port, copy_dir)
         if not cdp:
             return None, err

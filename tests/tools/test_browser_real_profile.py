@@ -361,7 +361,7 @@ class TestRealProfileCdpLaunch:
              patch.object(bt_real_profile, "_cdp_http_ready", return_value=True), \
              patch.object(bt_real_profile, "_cdp_on_data_dir", return_value=False), \
              patch.object(bt_real_profile, "_agent_browser_close_session",
-                          side_effect=lambda s: closed.__setitem__("n", closed["n"] + 1)), \
+                          side_effect=lambda s, deadline=None: closed.__setitem__("n", closed["n"] + 1)), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
              patch.object(bt.subprocess, "run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
