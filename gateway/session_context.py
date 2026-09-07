@@ -130,7 +130,7 @@ def set_session_vars(
     user_name: str = "", scope_id: str = "", session_key: str = "", session_id: str = "",
     message_id: str = "", profile: str = "", browser_control_principal: str = "",
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
-    ui_session_id: str = "", cron_session: Any = _UNSET,
+    wake_delivery: Any = _UNSET, ui_session_id: str = "", cron_session: Any = _UNSET,
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
     ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
@@ -144,6 +144,12 @@ def set_session_vars(
     )
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
+    # Fail closed: a pre-split caller that only says async_delivery=False must NOT
+    # silently become wake-capable, so wake MIRRORS async unless the caller opts
+    # into the split explicitly. Only then are the bits independent (api_server is
+    # push=False / wake=True: it cannot push, but gateway/wake.py can resume it).
+    tokens.append(_SESSION_WAKE_DELIVERY.set(
+        bool(async_delivery) if wake_delivery is _UNSET else bool(wake_delivery)))
     _runtime_cwd("set_session_cwd", cwd)
     return tokens
 

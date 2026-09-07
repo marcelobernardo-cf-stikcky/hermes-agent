@@ -4,6 +4,7 @@ When browser.backend is "browser-use", the model gets ``browser_exec`` tool
 instead of default browser tools
 """
 
+import atexit
 import contextlib
 import importlib
 import json
@@ -30,6 +31,26 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this named session
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
 _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
+
+_owned_harness_daemons: set[str] = set()
+
+
+def _stop_owned_harness_daemons() -> None:
+    """Stop Browser Use cloud daemons started by Hermes before process exit."""
+    if not _owned_harness_daemons:
+        return
+    try:
+        from browser_harness.admin import stop_remote_daemon
+    except Exception:
+        return
+    for name in tuple(_owned_harness_daemons):
+        try:
+            stop_remote_daemon(name)
+        except Exception:
+            logger.debug("Could not stop Browser Use daemon %s", name, exc_info=True)
+
+
+atexit.register(_stop_owned_harness_daemons)
 
 # Prepended to the model's code for named sessions on SHARED browsers (a /browser connect CDP override): the
 # harness daemon attaches to the first existing page at startup, so two fresh named daemons can land on the
@@ -568,6 +589,8 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     # Chrome/CDP endpoint is reachable (their API key authenticates it)
     if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
         env["BU_AUTOSPAWN"] = "1"
+    if env.get("BU_AUTOSPAWN") and not _has_cdp_env(env):
+        _owned_harness_daemons.add(session or "default")
 
     # Remaining budget after setup — floor at _MIN_TIMEOUT_S so a slow-but-successful setup still gets a
     # workable CLI call instead of an instant, confusing timeout.

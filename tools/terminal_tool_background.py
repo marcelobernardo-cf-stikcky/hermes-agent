@@ -101,9 +101,14 @@ def _apply_async_support(proc_session, result_data, notify_on_complete, watch_pa
     poll. Otherwise stamp gateway routing. Returns (notify, watch_patterns)."""
     if not (notify_on_complete or watch_patterns):
         return notify_on_complete, watch_patterns
-    from gateway.session_context import async_delivery_supported, get_session_env
+    from gateway.session_context import (
+        async_delivery_supported, get_session_env, wake_delivery_supported,
+    )
 
-    if async_delivery_supported():
+    # Either capability keeps the promise honest: push delivers the completion
+    # directly, wake resumes the session so it can read the result. Gating on
+    # push alone silently disabled notify on api_server (push=False/wake=True).
+    if async_delivery_supported() or wake_delivery_supported():
         _stamp_gateway_routing(proc_session, get_session_env)
         return notify_on_complete, watch_patterns
     result_data["notify_on_complete"] = False
