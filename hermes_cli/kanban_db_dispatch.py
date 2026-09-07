@@ -2160,6 +2160,33 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
     )
 
 
+def _profile_provider_for_dispatch_guard(profile: str) -> Optional[str]:
+    try:
+        from hermes_cli.profiles import get_profile_dir
+        import yaml
+        raw = yaml.safe_load((get_profile_dir(profile) / "config.yaml").read_text(encoding="utf-8")) or {}
+        model = raw.get("model", {}) if isinstance(raw, dict) else {}
+        provider = model.get("provider") if isinstance(model, dict) else None
+        return str(provider).strip().lower() if provider else None
+    except Exception:
+        return None
+
+
+def _resolve_kanban_reserved_providers(task: Task) -> list[str]:
+    reserved = {item.strip().lower() for item in (os.environ.get("HERMES_KANBAN_RESERVED_PROVIDERS") or "").split(",") if item.strip()}
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        profile = (cfg.get("kanban") or {}).get("orchestrator_profile")
+        from hermes_cli import kanban_db
+        provider = kanban_db._profile_provider_for_dispatch_guard(profile) if profile else None
+        if provider:
+            reserved.add(provider)
+    except Exception:
+        pass
+    return sorted(reserved)
+
+
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -2201,7 +2228,14 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         pass
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
+    reserved_providers = _resolve_kanban_reserved_providers(task)
+    if reserved_providers:
+        env["HERMES_KANBAN_RESERVED_PROVIDERS"] = ",".join(reserved_providers)
     env["HERMES_KANBAN_TASK"] = task.id
+    if task.model_override:
+        env["HERMES_KANBAN_REQUESTED_MODEL"] = task.model_override
+    if task.provider_override:
+        env["HERMES_KANBAN_REQUESTED_PROVIDER"] = task.provider_override
     env["HERMES_KANBAN_WORKSPACE"] = workspace
     # Tag the session `kanban` so session-browsing surfaces filter it out by
     # source instead of rendering one sidebar row per attempt.

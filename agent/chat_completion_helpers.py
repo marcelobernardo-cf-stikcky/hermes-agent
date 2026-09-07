@@ -1885,10 +1885,36 @@ def _fallback_chain_exhausted(agent, reason: "FailoverReason | None") -> bool:
     """Chain exhausted (always False). A non-empty chain walked on a non-rate-limit failure arms a
     short cooldown so next turn's restore_primary_runtime stays gated instead of replaying the whole
     context across every provider again."""
+    if getattr(agent, "_provider_collision_detected", False):
+        task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+        raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+        try:
+            from hermes_cli import kanban_db
+            conn = kanban_db.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
+            try:
+                kanban_db.block_task(conn, task_id, reason="all fallback providers are reserved",
+                                     kind="capability", expected_run_id=int(raw_run_id) if raw_run_id else None)
+            finally:
+                conn.close()
+        except Exception:
+            logger.debug("Failed to block worker after provider collisions", exc_info=True)
     if agent._fallback_chain and reason not in _RATE_LIMIT_FAILOVER_REASONS:
         agent._rate_limited_until = max(
             getattr(agent, "_rate_limited_until", 0) or 0, time.monotonic() + _FALLBACK_EXHAUSTED_COOLDOWN_S)
     return False
+
+
+def _skip_reserved_fallback(agent, provider: str, model: str) -> bool:
+    reserved = {item.strip().lower() for item in (os.environ.get("HERMES_KANBAN_RESERVED_PROVIDERS") or "").split(",") if item.strip()}
+    if provider not in reserved:
+        return False
+    agent._provider_collision_detected = True
+    try:
+        from hermes_cli import kanban_db
+        kanban_db.record_worker_diagnostic("provider_collision", {"candidate_model": model, "candidate_provider": provider, "reserved_providers": sorted(reserved)})
+    except Exception:
+        logger.debug("Failed to persist provider_collision diagnostic", exc_info=True)
+    return True
 
 
 def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider: str, fb_model: str, unavailable: set) -> bool:
@@ -2032,8 +2058,10 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     unavailable = agent._unavailable_fallback_keys
     fb_provider = (fb.get("provider") or "").strip().lower()
     fb_model = (fb.get("model") or "").strip()
+    if _skip_reserved_fallback(agent, fb_provider, fb_model):
+        return try_activate_fallback(agent, reason)
     if _should_skip_fallback_candidate(agent, fb, fb_key, fb_provider, fb_model, unavailable):
-        return agent._try_activate_fallback(reason)
+        return try_activate_fallback(agent, reason)
 
     try:
         from agent.auxiliary_client import resolve_provider_client
@@ -2112,7 +2140,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if fb_provider == "nous":
             unavailable.add(fb_key)
         logger.error("Failed to activate fallback %s: %s", fb_model, e)
-        return agent._try_activate_fallback(reason)  # try next in chain
+        return try_activate_fallback(agent, reason)  # try next in chain
 
 
 # Keys outside the Chat Completions schema that strict gateways (Fireworks-backed OpenCode

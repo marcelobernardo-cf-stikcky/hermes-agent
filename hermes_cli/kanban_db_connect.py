@@ -795,6 +795,10 @@ _LATER_TASK_COLUMNS = (
     ("model_override", "model_override TEXT"),
     ("provider_override", "provider_override TEXT"),
     ("reasoning_effort", "reasoning_effort TEXT"),
+    ("requested_model", "requested_model TEXT"),
+    ("requested_provider", "requested_provider TEXT"),
+    ("effective_model", "effective_model TEXT"),
+    ("effective_provider", "effective_provider TEXT"),
     # Ralph-style goal loop toggle; 0 = classic single-shot worker.
     ("goal_mode", "goal_mode INTEGER NOT NULL DEFAULT 0"),
     ("goal_max_turns", "goal_max_turns INTEGER"),
@@ -987,6 +991,8 @@ _REBUILD_SPECS = {
         "CREATE TABLE task_runs ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " task_id TEXT NOT NULL, profile TEXT, step_key TEXT,"
+        " requested_model TEXT, requested_provider TEXT,"
+        " effective_model TEXT, effective_provider TEXT,"
         " status TEXT NOT NULL, claim_lock TEXT, claim_expires INTEGER,"
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"

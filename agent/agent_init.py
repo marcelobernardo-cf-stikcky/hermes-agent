@@ -469,6 +469,17 @@ def _finalize_routing(agent, api_mode, credential_pool):
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
 
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        try:
+            from hermes_cli import kanban_db
+            kanban_db.persist_worker_run_runtime(
+                agent.model, agent.provider,
+                requested_model=os.environ.get("HERMES_KANBAN_REQUESTED_MODEL"),
+                requested_provider=os.environ.get("HERMES_KANBAN_REQUESTED_PROVIDER"),
+            )
+        except Exception:
+            logger.debug("Failed to persist kanban worker runtime", exc_info=True)
+
     # Pre-warm the OpenRouter metadata cache (1h TTL) off-thread so the first pricing estimate
     # doesn't block. Process-level Event guard: an unguarded spawn leaks a thread per message.
     if (agent.provider == "openrouter" or agent._is_openrouter_url()) and \

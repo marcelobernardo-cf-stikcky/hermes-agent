@@ -978,6 +978,10 @@ CREATE TABLE IF NOT EXISTS task_runs (
     task_id             TEXT NOT NULL,
     profile             TEXT,
     step_key            TEXT,
+    requested_model     TEXT,
+    requested_provider  TEXT,
+    effective_model     TEXT,
+    effective_provider  TEXT,
     status              TEXT NOT NULL,
     -- status: running | done | blocked | crashed | timed_out | failed | released
     claim_lock          TEXT,
@@ -1971,6 +1975,27 @@ def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
 
 
+def persist_worker_run_runtime(
+    model: Optional[str], provider: Optional[str], *,
+    requested_model: Optional[str] = None, requested_provider: Optional[str] = None,
+) -> bool:
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    try:
+        run_id = int((os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip())
+    except ValueError:
+        return False
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE task_runs SET requested_model=COALESCE(?, requested_model), "
+                "requested_provider=COALESCE(?, requested_provider), effective_model=?, effective_provider=? "
+                "WHERE id=? AND task_id=? AND status='running'",
+                (requested_model, requested_provider, model, provider, run_id, task_id),
+            )
+    return cur.rowcount == 1
+
+
 def _end_or_synthesize_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, status: str,
     summary: Optional[str] = None, metadata: Optional[dict] = None, synthesize: bool,
@@ -2199,19 +2224,21 @@ def _claim_and_open_run(
     if cur.rowcount != 1:
         return None
     trow = conn.execute(
-        "SELECT assignee, max_runtime_seconds, current_step_key "
+        "SELECT assignee, max_runtime_seconds, current_step_key, model_override, provider_override "
         "FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     run_cur = conn.execute(
         """
         INSERT INTO task_runs (
             task_id, profile, step_key, status,
+            requested_model, requested_provider,
             claim_lock, claim_expires, max_runtime_seconds,
             started_at
-        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
         """,
         (
             task_id, trow["assignee"] if trow else None, trow["current_step_key"] if trow else None,
+            trow["model_override"] if trow else None, trow["provider_override"] if trow else None,
             lock, expires, trow["max_runtime_seconds"] if trow else None, now,
         ),
     )
@@ -3022,6 +3049,25 @@ def edit_completed_task_result(
             },
             run_id=run_id,
         )
+    return True
+
+
+def record_worker_diagnostic(kind: str, payload: Optional[dict] = None) -> bool:
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return False
+    raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    try:
+        run_id = int(raw_run_id) if raw_run_id else None
+    except ValueError:
+        run_id = None
+    # Module-local import: ``connect_closing`` lives in kanban_db_connect and reaches
+    # this module only through the lazy __getattr__ re-export, which does NOT populate
+    # globals() — a bare call raises NameError. Same pattern as the other call site.
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        with write_txn(conn):
+            _append_event(conn, task_id, kind, payload, run_id=run_id)
     return True
 
 
@@ -4363,6 +4409,8 @@ _PLUGIN_COMPAT_LAZY = {
     'configured_max_in_progress': ('hermes_cli.kanban_db_dispatch', 'configured_max_in_progress'),
     'connect': ('hermes_cli.kanban_db_connect', 'connect'),
     'connect_closing': ('hermes_cli.kanban_db_connect', 'connect_closing'),
+    '_profile_provider_for_dispatch_guard': ('hermes_cli.kanban_db_dispatch', '_profile_provider_for_dispatch_guard'),
+    '_resolve_kanban_reserved_providers': ('hermes_cli.kanban_db_dispatch', '_resolve_kanban_reserved_providers'),
     'count_notify_subs': ('hermes_cli.kanban_db_notify', 'count_notify_subs'),
     'count_running_tasks': ('hermes_cli.kanban_db_dispatch', 'count_running_tasks'),
     'count_running_tasks_other_boards': ('hermes_cli.kanban_db_dispatch', 'count_running_tasks_other_boards'),
