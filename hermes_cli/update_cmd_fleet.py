@@ -122,6 +122,14 @@ def _receipt_reports_stale_runtime(expected_sha: str | None = None) -> bool:
 
     if not _receipt_looks_unfinished(receipt):
         return False
+    # An update that never pulled (refused/aborted before the fetch) leaves
+    # ``plan.runtimes[].code_sha`` at the PRE-pull SHA. Comparing that against a
+    # checkout advanced by later commits reports a stale runtime forever, even
+    # though this update changed nothing. No SHA movement -> nothing to restart.
+    pre = (receipt.get("pre_update") or {}).get("sha")
+    post = (receipt.get("post_update") or {}).get("sha")
+    if pre and post and pre == post:
+        return False
     plan = receipt.get("plan")
     if not isinstance(plan, dict):
         return False
