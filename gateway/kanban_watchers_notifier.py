@@ -25,6 +25,22 @@ def _kbn():
     from hermes_cli import kanban_db_notify
     return kanban_db_notify
 
+
+def _record_drop(sub: dict, board: Optional[str], failures: int) -> None:
+    """Leave an auditable card mark before removing a dead-chat subscription."""
+    conn = _kbc().connect(board=board)
+    try:
+        from hermes_cli import kanban_db as kb
+        kb.add_comment(
+            conn,
+            sub["task_id"],
+            "kanban-notifier",
+            f"NOTIFIER SUBSCRIPTION DROPPED: {sub['platform']} chat {sub['chat_id']} "
+            f"after {failures} consecutive delivery failures.",
+        )
+    finally:
+        conn.close()
+
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
@@ -376,6 +392,9 @@ class _KanbanNotification:
     async def unsub(self) -> None:
         await _to_thread_process_service(self.runner._kanban_unsub, self.sub, self.board_slug)
 
+    async def record_drop(self, failures: int) -> None:
+        await _to_thread_process_service(_record_drop, self.sub, self.board_slug, failures)
+
     def clear_failures(self) -> None:
         self.sub_fail_counts.pop(self.sub_key, None)
 
@@ -386,7 +405,13 @@ class _KanbanNotification:
         logger.warning(fmt, *prefix, fails, MAX_SEND_FAILURES, exc, exc_info=exc_info)
         if fails >= MAX_SEND_FAILURES:
             logger.warning(drop_fmt, self.task_id, self.platform_str, fails)
-            await self.unsub()
+            try:
+                await self.record_drop(fails)
+            except Exception as mark_exc:
+                logger.warning("kanban notifier: failed to mark dropped subscription for %s: %s",
+                               self.task_id, mark_exc, exc_info=True)
+            finally:
+                await self.unsub()
             self.clear_failures()
         else:
             await self.rewind()
