@@ -108,6 +108,14 @@ if [ -f "$HOME/.hermes/pytest_live_guard.py" ]; then
 fi
 
 
+# Worker default: leave this workstation usable. The runner defaults to
+# cpu_count*2 (32 here) - right for CI, wrong for a machine someone is using:
+# measured on tests/cron (1178 tests), 32w=61s vs 8w=77s, +16s for 8 free CPUs.
+# CI always sets the var explicitly (tests.yml=96, docker.yml=nproc), so this
+# default never reaches it.
+: "${HERMES_TEST_WORKERS:=8}"
+export HERMES_TEST_WORKERS
+
 # ── Windows location variables (computed before we drop env) ───────────────
 # `env -i` forwards HOME, which is enough on POSIX. Native Windows CPython
 # resolves Path.home() from USERPROFILE (or HOMEDRIVE+HOMEPATH), stdlib
@@ -163,7 +171,7 @@ cd "$REPO_ROOT"
 # compiling on first import) avoids redundant work across ~2000 processes.
 # Uses git to list tracked .py files (skips venv, node_modules, etc).
 echo "▶ pre-compiling bytecode cache"
-"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+"$PYTHON" -m compileall -q -j "${HERMES_TEST_WORKERS:-0}" -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
 exec env -i \
