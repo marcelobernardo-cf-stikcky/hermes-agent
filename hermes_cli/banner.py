@@ -280,6 +280,12 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     # clones keep the exact count path. Mirrors apps/desktop/electron/main.cjs.
     is_shallow = _git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir) == "true"
 
+    # A fork's ``origin`` is the user's OWN repo: it never advances on its own, so comparing HEAD
+    # against it reports "up to date" forever while the official repo moves on (a local fork sat
+    # 659 commits behind while the badge stayed silent). Prefer ``upstream`` when the remote
+    # exists — the same source ``hermes update`` already treats as a fork's real update source.
+    remote = "upstream" if _git_ok(["remote", "get-url", "upstream"], cwd=repo_dir) else "origin"
+
     def _fetch() -> bool:
         # Self-heal abandoned git lock files first. A stale .git/shallow.lock from a crashed fetch
         # makes every fetch fail silently and stale refs get compared against HEAD until a human
@@ -291,9 +297,9 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
 
         # Scope the fetch to the one branch compared against: an unscoped ``git fetch origin``
         # transfers ~1,400 remote heads (3.0 s vs 0.55 s measured) and can burn the full timeout.
-        # A scoped fetch still updates ``origin/main`` and FETCH_HEAD; ``--depth 1`` preserves
+        # A scoped fetch still updates ``<remote>/main`` and FETCH_HEAD; ``--depth 1`` preserves
         # the shallow boundary.
-        fetch_args = ["fetch", "origin", "main", *(["--depth", "1"] if is_shallow else []), "--quiet"]
+        fetch_args = ["fetch", remote, "main", *(["--depth", "1"] if is_shallow else []), "--quiet"]
         return _git_ok(fetch_args, cwd=repo_dir, timeout=10, network=True)
 
     fetch_ok = _quiet(_fetch, False)  # Offline or timeout — don't use stale refs
@@ -309,9 +315,9 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
         target_rev = (
             _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
-            or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir))
+            or _git_stdout(["rev-parse", f"{remote}/main"], cwd=repo_dir))
         return _tips_behind(head_rev, target_rev)
-    behind = _git_count(["rev-list", "--count", "HEAD..origin/main"], cwd=repo_dir)
+    behind = _git_count(["rev-list", "--count", f"HEAD..{remote}/main"], cwd=repo_dir)
     return behind if fetch_ok or (behind is not None and behind > 0) else None
 
 
