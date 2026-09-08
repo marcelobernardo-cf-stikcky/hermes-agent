@@ -79,6 +79,27 @@ def _in_excluded_root_dir(rel_path: Path) -> bool:
 _SQLITE_SIDECAR_SUFFIXES = (".db-wal", ".db-shm", ".db-journal")
 _EXCLUDED_SUFFIXES = (".pyc", ".pyo", *_SQLITE_SIDECAR_SUFFIXES)
 
+# Browser caches under the Hermes-driven Chrome profile (``chrome-debug/``). Measured
+# 2026-09-07: 0.99 GB of 1.09 GB was pure cache — Chrome refetches all of it on demand.
+# Deliberately NOT excluding the whole tree: ``Default/Network/Cookies`` (192 KB) holds the
+# live sessions (TikTok Shop, ElevenLabs, Printful, Google), so dropping it would force a
+# full re-login after any restore. Matched at any depth, but only inside the browser
+# profile root — a skill's own ``Cache/`` dir is user data.
+_BROWSER_PROFILE_ROOTS = {"chrome-debug"}
+_BROWSER_CACHE_DIRS = {
+    "Cache", "Code Cache", "GPUCache", "ShaderCache", "GrShaderCache",
+    "DawnGraphiteCache", "DawnWebGPUCache", "Service Worker", "component_crx_cache",
+    "optimization_guide_model_store", "Safe Browsing", "WasmTtsEngine",
+    "OnDeviceHeadSuggestModel", "Crashpad",
+}
+
+
+def _is_browser_cache(rel_path: Path) -> bool:
+    """True when *rel_path* sits in a regenerable cache dir of the automation browser profile."""
+    parts = rel_path.parts
+    return (len(parts) >= 2 and parts[0] in _BROWSER_PROFILE_ROOTS
+            and any(p in _BROWSER_CACHE_DIRS for p in parts[1:]))
+
 # File names to skip (runtime state that's meaningless on another machine)
 _EXCLUDED_NAMES = {".backup.lock", "gateway.pid", "cron.pid"}
 
@@ -225,6 +246,8 @@ def _should_exclude(rel_path: Path) -> bool:
     parts = rel_path.parts
     if _in_excluded_root_dir(rel_path):
         return True
+    if _is_browser_cache(rel_path):
+        return True
     # ``hermes-agent`` only matches at the root level; nested same-named dirs are preserved.
     if any(p in _EXCLUDED_DIRS and (p != "hermes-agent" or p == parts[0]) for p in parts):
         return True
@@ -245,7 +268,8 @@ def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional
         kept = [
             d for d in dirnames
             if (d not in _EXCLUDED_DIRS or (d == "hermes-agent" and not is_root))
-            and not _in_excluded_root_dir(rel_dir / d)]
+            and not _in_excluded_root_dir(rel_dir / d)
+            and not _is_browser_cache(rel_dir / d)]
         if skipped_dirs is not None:
             skipped_dirs.update(str(rel_dir / d) for d in set(dirnames) - set(kept))
         dirnames[:] = kept
