@@ -118,7 +118,7 @@ def _kanban_handler(tool_name: str) -> Callable:
 def _reject_delegated_child_mutation(tool_name: str) -> None:
     """A delegate_task child shares the parent's process, so inherited HERMES_KANBAN_*
     env is not proof of ownership: it may report findings but must not mutate."""
-    if _is_delegated_child_context():
+    if _delegation_ctx("is_delegated_child_process_context", False):
         raise _Reject(
             f"{tool_name} refused: delegate_task child agents are not Kanban run owners. "
             "Return findings to the parent agent; the dispatcher worker or an explicitly "
@@ -153,64 +153,6 @@ def _worker_run_id(task_id: str) -> Optional[int]:
         return int(raw) if raw else None
     except ValueError:
         return None
-
-
-def _reject_self_approved_review(kb, conn, task_id: str) -> Optional[str]:
-    """Refuse ``kanban_complete`` when THIS worker's run was claimed FROM
-    ``review`` and the ``review_requested`` event it is closing out never
-    named a reviewer distinct from the implementer.
-
-    Guards ONLY this agent-facing tool — deliberately NOT
-    ``hermes_cli.kanban_db.complete_task`` itself, which is also the
-    human/dashboard approval path for a run-less ``review`` task (#54823)
-    and the legitimate reopen/reclaim path where no reviewer was ever set
-    (see ``test_reopening_parent_retracts_review_and_blocks_approval``); a
-    guard placed at that layer caught both cases and broke the second one.
-    A run claimed FROM ``review`` inherits ``source_status=review`` on its
-    ``claimed`` event (see ``kb.claim_review_task``); when that is true and
-    the ``review_requested`` event has no distinct reviewer, an agent must
-    not self-approve via this tool — this is exactly the reviewer=None gap
-    that let a wake-resumed run complete its own review with zero elapsed
-    time (run #160, #t_ae5576ac).
-
-    Returns ``None`` when not applicable, else a diagnostic string.
-    """
-    run_id = _worker_run_id(task_id)
-    if run_id is None:
-        return None
-    claimed_events = [
-        e for e in kb.list_events(conn, task_id)
-        if e.kind == "claimed" and e.run_id == run_id
-    ]
-    if not claimed_events:
-        return None
-    claimed_payload = claimed_events[-1].payload
-    if not isinstance(claimed_payload, dict) or claimed_payload.get("source_status") != "review":
-        return None  # ordinary implementer completion, not a review claim.
-    review_events = [
-        e for e in kb.list_events(conn, task_id) if e.kind == "review_requested"
-    ]
-    if not review_events:
-        return None
-    payload = review_events[-1].payload
-    if not isinstance(payload, dict):
-        payload = {}
-    implementer = payload.get("implementer")
-    reviewer = payload.get("reviewer")
-    if (
-        not isinstance(reviewer, str)
-        or not reviewer.strip()
-        or (isinstance(implementer, str) and reviewer.strip() == implementer.strip())
-    ):
-        return (
-            "this run was claimed from review with no reviewer distinct "
-            "from the implementer on record (reviewer=None or "
-            "reviewer==implementer); an agent cannot self-approve via "
-            "kanban_complete — request a human/dashboard approval, or "
-            "call kanban_request_changes and re-request review with an "
-            "explicit reviewer"
-        )
-    return None
 
 
 def _stamp_worker_session_metadata(task_id: str, metadata: Optional[dict]) -> Optional[dict]:
@@ -367,7 +309,7 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
-    "provider_override".split())
+    "provider_override completion_contract last_failure_error".split())
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override".split())
@@ -429,28 +371,22 @@ _GOAL_GATE_MESSAGES = {
             "matching the card before requesting review.")}}
 
 
-def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> Optional[dict]:
-    """Goal-mode pre-handoff judge gate. Returns a metadata stamp when the
-    judge is unreachable (quota/5xx) so the run records ``judge_unavailable``.
-    Raises ``_Reject`` on a real ``continue``/``blocked`` verdict.
-    """
+def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
+    """Goal-mode pre-handoff judge gate: a worker must not complete / request
+    review before acceptance criteria are met. ``blocked`` gets its own
+    guidance; any other non-``done`` verdict gets the ``continue`` guidance.
+    A broken judge fails open (logged) so it cannot permanently wedge work."""
     if not task or not task.goal_mode or not _goal_judge_available():
-        return None
+        return
     try:
-        verdict, reason, _, _, transport_failed = judge_goal(
+        verdict, reason, _, _, _ = judge_goal(
             goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
     except Exception as judge_exc:
         logger.warning(
             "goal judge check failed, allowing lifecycle handoff: %s", judge_exc, exc_info=True)
-        return None
-    if transport_failed:
-        logger.warning(
-            "goal judge unavailable (%s); allowing lifecycle handoff",
-            reason or "transport_failed",
-        )
-        return {"judge_unavailable": True}
+        return
     if verdict == "done":
-        return None
+        return
     key = "blocked" if verdict == "blocked" else "continue"
     raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
 
@@ -554,39 +490,12 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 # --- Handlers ---
 
-# Own-card ids already served in full to this worker process (one-shot
-# process, so a module set is the whole lifetime).
-_OWN_CARD_READ: set = set()
-_LEAN_TASK_FIELDS = ("id", "title", "status", "assignee", "current_run_id", "workspace_path")
-
-
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events.
-
-    First own-card read is full (body reaches the worker here). Re-reads are lean.
-    """
+    """Full task state: row, parents, children, comments, runs, last 50 events."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
-        if os.environ.get("HERMES_KANBAN_TASK") == tid and tid in _OWN_CARD_READ:
-            runs = kb.list_runs(conn, tid)
-            latest = _fields(runs[-1], _RUN_FIELDS) if runs else None
-            if latest:
-                latest = {k: v for k, v in latest.items() if v is not None}
-            comments = kb.list_comments(conn, tid)
-            return json.dumps({
-                "task": _fields(task, _LEAN_TASK_FIELDS),
-                "parents": kb.parent_ids(conn, tid),
-                "children": kb.child_ids(conn, tid),
-                "comments": [_fields(c, _COMMENT_FIELDS) for c in comments[-3:]],
-                "latest_run": latest,
-                "note": (
-                    "worker view: body and handoffs were in your first "
-                    "kanban_show; only the last 3 comments and latest run are shown."
-                ),
-            })
-        _OWN_CARD_READ.add(tid)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
@@ -652,35 +561,35 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        self_review_reason = _reject_self_approved_review(kb, conn, tid)
-        if self_review_reason is not None:
-            return tool_error(f"kanban_complete blocked: {self_review_reason}")
-        stamp = _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
-        if stamp:
-            metadata = {**(metadata or {}), **stamp}
+        _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
-                created_cards=created_cards, expected_run_id=_worker_run_id(tid),
-                with_reason=True)
+                created_cards=created_cards, expected_run_id=_worker_run_id(tid))
         except kb.ArtifactPreservationError as artifact_err:
+            # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
+            # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
+            # gate runs before the write txn), so the worker can simply call kanban_complete again. Spell
+            # that out — without it the model often interprets a tool_error as a terminal failure and either
+            # blocks or crashes the run instead of retrying. See #22923.
             return tool_error(
                 f"kanban_complete could not preserve the declared artifacts: {artifact_err}. "
                 f"Your task is still in-flight and its scratch workspace was kept. Fix the "
                 f"artifact path or storage error, then retry kanban_complete with the same "
                 f"handoff.")
         except kb.HallucinatedCardsError as hall_err:
+            # The gate runs before the write txn, so the task was NOT mutated;
+            # say so explicitly or the model treats the error as terminal and
+            # blocks/crashes instead of retrying. Audit event already landed.
             return tool_error(
                 f"kanban_complete blocked: the following created_cards do not exist or were not "
                 f"created by this worker: {', '.join(hall_err.phantom)}. Your task is still "
                 f"in-flight (no state change). Retry kanban_complete with the same "
                 f"summary/metadata and either drop these ids from created_cards, or pass "
                 f"created_cards=[] to skip the card-claim check entirely.")
-        if isinstance(ok, tuple):
-            ok, fail_reason = ok
-        else:
-            fail_reason = None
-        _check(ok, f"could not complete {tid}: {fail_reason or 'unknown id or already terminal'}")
+        task = kb.get_task(conn, tid)
+        _check(ok, (task.last_failure_error if task else None) or
+               f"could not complete {tid} (unknown id, stale run, or already terminal)")
         run = kb.latest_run(conn, tid)
         return _ok(task_id=tid, run_id=run.id if run else None)
 
@@ -732,9 +641,7 @@ def _handle_request_review(args: dict, **kw) -> str:
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
     with _board(args.get("board")) as (kb, conn):
-        stamp = _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
-        if stamp:
-            metadata = {**(metadata or {}), **stamp}
+        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
         ok, fail_reason = kb.request_review(
             conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
             expected_run_id=_worker_run_id(tid), with_reason=True)
@@ -903,12 +810,6 @@ def _handle_create(args: dict, **kw) -> str:
     assignee = args.get("assignee")
     _check(assignee, "assignee is required — name the profile that should execute this "
                      "task (the dispatcher will only spawn tasks with an assignee)")
-    # Prefer the request-scoped api_server origin binding over HERMES_SESSION_ID: the env
-    # var is clobbered with a subagent's internal id whenever a child agent is constructed
-    # in-process, which would stamp — and later wake — the wrong session.
-    from tools.async_delegation import _current_origin_session_id
-    session_id = (args.get("session_id") or _current_origin_session_id()
-                  or os.environ.get("HERMES_SESSION_ID"))
     # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
     # even for a dispatcher-spawned creator (reusing the parent's path would let a child
     # mutate review evidence or race its checkout). Project identity is the one safe thing
@@ -924,9 +825,14 @@ def _handle_create(args: dict, **kw) -> str:
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
+        from tools.async_delegation import _current_origin_session_id
+        self_tid = (os.environ.get("HERMES_KANBAN_TASK")
+                    if _is_dispatcher_owned_worker() else None)
+        self_task = kb.get_task(conn, self_tid) if self_tid else None
+        # The worker/API runtime may be transient; the owning task's origin is durable.
+        session_id = (args.get("session_id") or (self_task.session_id if self_task else None)
+                      or _current_origin_session_id() or os.environ.get("HERMES_SESSION_ID"))
         if project_id is None and workspace_kind is None and workspace_path is None:
-            self_tid = os.environ.get("HERMES_KANBAN_TASK")
-            self_task = kb.get_task(conn, self_tid) if self_tid else None
             if self_task is not None and self_task.project_id:
                 project_id, project_source_task_id = self_task.project_id, self_task.id
         new_tid = kb.create_task(
@@ -936,10 +842,12 @@ def _handle_create(args: dict, **kw) -> str:
             workspace_kind=str(workspace_kind if workspace_kind is not None else "scratch"),
             workspace_path=workspace_path, project_id=project_id,
             project_source_task_id=project_source_task_id, triage=triage,
+            creator_task_id=self_tid,
             idempotency_key=args.get("idempotency_key"),
             max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
             model_override=model_override, provider_override=provider_override,
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
+            completion_contract=args.get("completion_contract"),
             initial_status=str(args.get("initial_status") or "running"),
             created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
@@ -970,7 +878,11 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         except Exception:
             notifier_profile = "default"
     delivery_metadata: dict[str, Any] = {
-        k: v for k, v in (("thread_id", thread_id), ("chat_type", chat_type)) if v}
+        k: v for k, v in (
+            ("thread_id", thread_id), ("chat_type", chat_type),
+            ("scope_id", env("HERMES_SESSION_SCOPE_ID", "")),
+            ("parent_chat_id", env("HERMES_SESSION_PARENT_CHAT_ID", "")),
+        ) if v}
     if (platform.lower() == "telegram" and thread_id
             and (chat_type or "").lower() in {"dm", "direct", "private"}):
         delivery_metadata["telegram_dm_topic_reply_fallback"] = True
@@ -1002,8 +914,13 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         target = _resolve_notify_target()
         if target is None:
             return False  # CLI / cron / test — no persistent channel
-        from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_notify as _kbn
+        # Inheritance and explicit subscriptions already encode the delivery policy.
+        # Auto-subscribe must not turn a passive destination into an agent wake.
+        if any(sub["platform"] == target["platform"] and sub["chat_id"] == target["chat_id"]
+               and (sub["thread_id"] or "") == (target["thread_id"] or "")
+               for sub in _kbn.list_notify_subs(conn, task_id)):
+            return True
         _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:

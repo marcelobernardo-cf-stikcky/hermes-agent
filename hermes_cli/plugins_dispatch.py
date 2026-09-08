@@ -202,36 +202,21 @@ class PluginDispatchMixin:
         self, hook_name: str, cb: Callable, kwargs: Dict[str, Any], timeout: float
     ) -> Any:
         """Run one callback on a daemon worker with a wall-clock cap; ``_HOOK_SKIPPED`` when
-        suppressed, still running, or timed out (worker abandoned, never joined). Exceptions
-        propagate."""
+        suppressed, still running, timed out (worker abandoned, never joined), or the worker
+        could not be started. Exceptions propagate."""
         callback_name = getattr(cb, "__name__", repr(cb))
         callback_key = (hook_name, id(cb))
         token = object()
         with self._hook_timeout_lock:
             suppressed_until = self._hook_timeout_suppressed_until.get(callback_key)
-            if suppressed_until is not None and suppressed_until > time.monotonic():
+            running = callback_key in self._hook_running_callbacks
+            if (suppressed_until is not None and suppressed_until > time.monotonic()) or running:
                 logger.warning(
                     "Hook '%s' callback %s skipped after previous "
-                    "timeout", hook_name, callback_name)
+                    "timeout or while still running", hook_name, callback_name)
                 return _HOOK_SKIPPED
             if suppressed_until is not None:
                 self._hook_timeout_suppressed_until.pop(callback_key, None)
-            callback_lock = self._hook_callback_locks.setdefault(callback_key, threading.Lock())
-
-        deadline = time.monotonic() + timeout
-        if not callback_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            logger.warning(
-                "Hook '%s' callback %s skipped while previous call is still running",
-                hook_name, callback_name)
-            return _HOOK_SKIPPED
-        with self._hook_timeout_lock:
-            # A timed-out holder may have set the cooldown while this caller was waiting.
-            suppressed_until = self._hook_timeout_suppressed_until.get(callback_key)
-            if suppressed_until is not None and suppressed_until > time.monotonic():
-                callback_lock.release()
-                logger.warning(
-                    "Hook '%s' callback %s skipped after previous timeout", hook_name, callback_name)
-                return _HOOK_SKIPPED
             self._hook_running_callbacks[callback_key] = token
 
         context = contextvars.copy_context()
@@ -239,21 +224,30 @@ class PluginDispatchMixin:
         outcome: Dict[str, Any] = {}
         failure: Dict[str, Exception] = {}
 
+        def _release_token() -> None:
+            with self._hook_timeout_lock:
+                if self._hook_running_callbacks.get(callback_key) is token:
+                    self._hook_running_callbacks.pop(callback_key, None)
+
         def _runner() -> None:
             try:
                 outcome["value"] = context.run(self._invoke_hook_callback, cb, kwargs)
             except Exception as exc:
                 failure["exc"] = exc
             finally:
-                with self._hook_timeout_lock:
-                    if self._hook_running_callbacks.get(callback_key) is token:
-                        self._hook_running_callbacks.pop(callback_key, None)
-                callback_lock.release()
+                _release_token()
                 done.set()
 
         thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
-        thread.start()
-        if not done.wait(timeout=max(0.0, deadline - time.monotonic())):  # do not join — that would reintroduce the hang
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            _release_token()  # the runner's finally never runs when OS thread creation fails
+            logger.warning(
+                "Hook '%s' callback %s worker failed to start: %s — skipping",
+                hook_name, callback_name, exc)
+            return _HOOK_SKIPPED
+        if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
                 # See #6622.
                 self._hook_timeout_suppressed_until[callback_key] = (

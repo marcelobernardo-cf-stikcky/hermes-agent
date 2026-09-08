@@ -127,3 +127,16 @@ def test_todo_start_emits_even_with_progress_off(monkeypatch):
     server._on_tool_start(sid, "call-1", "todo", {"todos": []})
 
     assert [event[0] for event in events] == ["tool.start"]
+def test_subagent_lifecycle_bypasses_tool_progress_off(monkeypatch):
+    """Subagent rows feed the Desktop status stack / TUI spawn tree — application state, not
+    tool-progress chrome — so display.tool_progress=off must not swallow them."""
+    sid = "subagent-progress-off"
+    events = []
+    monkeypatch.setitem(server._sessions, sid, {"agent": None, "tool_progress_mode": "off"})
+    monkeypatch.setattr(server, "_tool_progress_enabled", lambda _sid: False)
+    monkeypatch.setattr(server, "_emit", lambda event, event_sid, payload=None: events.append(event))
+
+    server._on_tool_progress(sid, "subagent.start", "delegate_task", "goal", None, goal="goal", subagent_id="s1")
+    server._on_tool_progress(sid, "reasoning.available", "_thinking", "hmm", None)
+
+    assert events == ["subagent.start"]
