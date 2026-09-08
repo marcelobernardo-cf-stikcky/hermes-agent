@@ -389,7 +389,7 @@ import {
 } from './update-count'
 import { waitForUpdateClearance } from './update-gate'
 import { readLiveUpdateMarker, updateHandoffConflict, writeUpdateMarker } from './update-marker'
-import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
+import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL, resolveCheckRemote } from './update-remote'
 import {
   collectRelaunchArgs,
   observeUpdaterHandoff,
@@ -3147,7 +3147,11 @@ async function checkUpdates() {
   // check reports 'fetch-failed' forever — git never removes these itself.
   await clearStaleGitLocks(updateRoot)
 
-  const fetched = await runGit(['fetch', '--quiet', 'origin', branch], { cwd: updateRoot })
+  // Forks compare against `upstream` (their own origin never advances).
+  const hasUpstream = (await runGit(['remote', 'get-url', 'upstream'], { cwd: updateRoot })).code === 0
+  const checkRemote = resolveCheckRemote({ originUrl, hasUpstream })
+
+  const fetched = await runGit(['fetch', '--quiet', checkRemote, branch], { cwd: updateRoot })
 
   if (fetched.code !== 0) {
     return {
@@ -3164,7 +3168,7 @@ async function checkUpdates() {
 
   const [currentSha, targetSha, dirtyStr, currentBranch, shallowStr] = await Promise.all([
     git(['rev-parse', 'HEAD']),
-    git(['rev-parse', `origin/${branch}`]),
+    git(['rev-parse', `${checkRemote}/${branch}`]),
     git(['status', '--porcelain']),
     git(['rev-parse', '--abbrev-ref', 'HEAD']),
     git(['rev-parse', '--is-shallow-repository'])
@@ -3174,14 +3178,16 @@ async function checkUpdates() {
 
   // A shallow graph cannot provide a trustworthy exact count, even when it has
   // a visible merge-base. Skip the ancestry walk and use the SHA fallback.
-  const countStr = shouldCountCommits({ isShallow }) ? await git(['rev-list', `HEAD..origin/${branch}`, '--count']) : ''
+  const countStr = shouldCountCommits({ isShallow })
+    ? await git(['rev-list', `HEAD..${checkRemote}/${branch}`, '--count'])
+    : ''
 
   // A positive directional ancestry result remains trustworthy in a shallow
   // graph and prevents a local commit on top of origin from looking outdated.
   const targetIsAncestorOfHead =
     isShallow &&
     currentSha !== targetSha &&
-    (await runGit(['merge-base', '--is-ancestor', `origin/${branch}`, 'HEAD'], { cwd: updateRoot })).code === 0
+    (await runGit(['merge-base', '--is-ancestor', `${checkRemote}/${branch}`, 'HEAD'], { cwd: updateRoot })).code === 0
 
   let behind = resolveBehindCount({
     countStr,
@@ -3194,16 +3200,19 @@ async function checkUpdates() {
   // Recover the exact count a shallow clone can't compute: the GitHub compare
   // API knows the full graph regardless of local clone depth. Best-effort —
   // offline, rate-limited, or non-GitHub origins keep the honest null
-  // ("update available", no fabricated number).
+  // ("update available", no fabricated number). On a fork both SHAs live in
+  // the official repo, so compare there — the fork's own origin has neither.
   if (behind === null) {
-    behind = await fetchCompareBehindCount({ currentSha, originUrl, targetSha })
+    const compareUrl = checkRemote === 'upstream' ? OFFICIAL_REPO_HTTPS_URL : originUrl
+
+    behind = await fetchCompareBehindCount({ currentSha, originUrl: compareUrl, targetSha })
   }
 
   // behind === null means "update available, exact count unknown" (shallow
   // clone): still list what origin offers — resolveCommitLogSelection keeps
   // the shallow log to the fetched tip so the range walk can't enumerate the
   // contaminated ancestry — so "See what's new" stays useful and honest.
-  const commits = behind !== 0 ? await readCommitLog(updateRoot, branch, isShallow) : []
+  const commits = behind !== 0 ? await readCommitLog(updateRoot, branch, isShallow, checkRemote) : []
 
   return {
     supported: true,
@@ -3274,10 +3283,10 @@ async function fetchCompareBehindCount({ currentSha, originUrl, targetSha }) {
   }
 }
 
-async function readCommitLog(cwd, branch, isShallow) {
+async function readCommitLog(cwd, branch, isShallow, remote = 'origin') {
   const SEP = '\x1f'
   const REC = '\x1e'
-  const { limit, revision } = resolveCommitLogSelection({ branch, isShallow })
+  const { limit, revision } = resolveCommitLogSelection({ branch, isShallow, remote })
 
   const { stdout } = await runGit(
     ['log', revision, `--pretty=format:%H${SEP}%s${SEP}%an${SEP}%at${REC}`, '-n', String(limit)],

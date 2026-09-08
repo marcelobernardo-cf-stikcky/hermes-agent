@@ -62,4 +62,22 @@ function isOfficialSshRemote(url) {
   return isSshRemote(url) && canonicalGitHubRemote(url) === OFFICIAL_REPO_CANONICAL
 }
 
-export { canonicalGitHubRemote, isOfficialSshRemote, isSshRemote, OFFICIAL_REPO_CANONICAL, OFFICIAL_REPO_HTTPS_URL }
+// Which remote a passive update check should compare HEAD against.
+//
+// A fork's `origin` is the user's OWN repo: it never advances on its own, so
+// comparing HEAD against it reports "up to date" forever while the official
+// repo moves on (a local fork sat 659 commits behind while the badge stayed
+// silent). Prefer `upstream` — the same source `hermes update` already treats
+// as a fork's real update source — and keep `origin` for official checkouts.
+function resolveCheckRemote({ originUrl, hasUpstream }) {
+  return hasUpstream && canonicalGitHubRemote(originUrl) !== OFFICIAL_REPO_CANONICAL ? 'upstream' : 'origin'
+}
+
+export {
+  canonicalGitHubRemote,
+  isOfficialSshRemote,
+  isSshRemote,
+  OFFICIAL_REPO_CANONICAL,
+  OFFICIAL_REPO_HTTPS_URL,
+  resolveCheckRemote
+}

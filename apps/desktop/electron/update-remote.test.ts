@@ -24,7 +24,8 @@ import {
   isOfficialSshRemote,
   isSshRemote,
   OFFICIAL_REPO_CANONICAL,
-  OFFICIAL_REPO_HTTPS_URL
+  OFFICIAL_REPO_HTTPS_URL,
+  resolveCheckRemote
 } from './update-remote'
 
 test('canonicalGitHubRemote normalizes SSH and HTTPS forms to the same value', () => {
@@ -76,4 +77,29 @@ test('isOfficialSshRemote does NOT match forks, other hosts, or HTTPS', () => {
 test('OFFICIAL_REPO_HTTPS_URL canonicalizes to OFFICIAL_REPO_CANONICAL', () => {
   // Invariant: the URL we substitute in must be the same repo we detect.
   assert.equal(canonicalGitHubRemote(OFFICIAL_REPO_HTTPS_URL), OFFICIAL_REPO_CANONICAL)
+})
+
+// FAIL-BEFORE: the check fetched and counted against `origin` unconditionally.
+// A fork's origin is the user's OWN repo, which never advances on its own, so
+// `HEAD..origin/main` stayed 0 forever and the badge reported "up to date"
+// while the official repo moved on (a real fork sat 659 commits behind).
+test('a fork with an upstream remote is checked against upstream, not its own origin', () => {
+  assert.equal(
+    resolveCheckRemote({ originUrl: 'https://github.com/someuser/hermes-agent.git', hasUpstream: true }),
+    'upstream'
+  )
+  // SSH fork form resolves the same — canonicalization is remote-form agnostic.
+  assert.equal(resolveCheckRemote({ originUrl: 'git@github.com:someuser/hermes-agent.git', hasUpstream: true }), 'upstream')
+})
+
+test('official checkouts and upstream-less forks keep origin', () => {
+  // origin IS the official repo: it advances on its own, so it is the truth.
+  assert.equal(resolveCheckRemote({ originUrl: OFFICIAL_REPO_HTTPS_URL, hasUpstream: true }), 'origin')
+  // A fork with no upstream remote has nothing better to compare against;
+  // never emit a remote name that git would reject.
+  assert.equal(
+    resolveCheckRemote({ originUrl: 'https://github.com/someuser/hermes-agent.git', hasUpstream: false }),
+    'origin'
+  )
+  assert.equal(resolveCheckRemote({ originUrl: '', hasUpstream: false }), 'origin')
 })
