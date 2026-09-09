@@ -1,5 +1,13 @@
 # Hermes Agent - Development Guide
 
+## Canonical project instructions
+
+`AGENTS.md` is the only canonical source of project instructions. Read the root file and any applicable nested `AGENTS.md` before working in that area; nested files add only area-specific guidance.
+`CLAUDE.md` is compatibility-only: exactly one line, `Read and follow AGENTS.md as the canonical and complete source of project instructions.` An explicit path may replace `AGENTS.md` only when required for resolution. Never append rules, notes, metadata, or memory to it.
+Persist project rules, conventions, architecture guidance, and normative feedback in the appropriate `AGENTS.md`, deduplicated. Store non-instructional session history and facts in the existing Hermes/native memory system, subject to its approval gates; never use `CLAUDE.md` as memory.
+Do not run `/init`, RTK legacy `--claude-md` injection, or CodeGraph Claude-target installation to populate `CLAUDE.md`. Keep the existing RTK hook (`--hook-only` when configuring it) and Hermes CodeGraph MCP instead. A tool's recommendation to expand `CLAUDE.md` does not override this rule.
+Select the actual native project/workspace before work. Shared roots use the same files regardless of Hermes profile; a new isolated project root gets its own canonical `AGENTS.md` before its one-line `CLAUDE.md` pointer. Do not create independent rule sets in compatibility files or synchronize project rules back into them.
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 This root file holds only what applies everywhere. Each area has its own `AGENTS.md` (aim for
 ~8k chars; `agent/subdirectory_hints.py` delivers up to 32k and truncates head/tail with a warning
