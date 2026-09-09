@@ -6,11 +6,13 @@ State (``_REAL_PROFILE_SESSION``, ``_real_profile_cdp_lock``, ``_real_profile_cd
 through ``_bt`` (resolved per call — never import ``tools.browser_tool`` at import time).
 """
 
+import json
 import os
 import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional, Tuple
 from tools.browser_tool_origin import origin_module as _origin
 from tools import browser_tool_cloud as _cloud
@@ -24,6 +26,87 @@ def _remaining(deadline: Optional[float]) -> Optional[float]:
     return None if deadline is None else deadline - time.monotonic()
 
 
+def _chrome_state_dir():
+    """On-disk records of Chromes we launched, so a crashed owner's browser is still reapable."""
+    from hermes_constants import get_hermes_home
+    path = Path(get_hermes_home()) / "cache" / "browser-use" / "real-profile-chrome"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _record_real_profile_chrome(proc, copy_dir: str) -> None:
+    """Record a launched Chrome (best-effort). Keyed by our PID so two owners never clobber.
+
+    Never raises: a failed record costs a later reap, but must not fail the launch itself.
+    """
+    from gateway.status import get_process_start_time
+    try:
+        pid = proc.pid if not isinstance(proc, int) else proc
+        record = {"pid": pid, "owner_pid": os.getpid(), "copy_dir": copy_dir,
+                  "start_time": get_process_start_time(pid), "started_at": time.time()}
+        (_chrome_state_dir() / f"{os.path.basename(copy_dir)}-{os.getpid()}.json").write_text(
+            json.dumps(record), encoding="utf-8")
+    except Exception as e:
+        _origin().logger.debug("could not write real-profile chrome record: %s", e)
+
+
+def _is_real_profile_chrome(pid: int, copy_dir, start_time) -> bool:
+    """True only when ``pid`` is verifiably the Chrome we launched on our own profile copy."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        if not any(f"--user-data-dir={copy_dir}" == a for a in proc.cmdline()):
+            return False
+        if start_time:
+            from gateway.status import get_process_start_time
+            return get_process_start_time(pid) == start_time
+    except Exception:
+        return False
+    return True
+
+
+def reap_orphaned_real_profile_chrome() -> int:
+    """Kill real-profile Chromes whose owning Hermes is gone; return the count.
+
+    ``_real_profile_chrome_procs`` is in-memory only, so an owner that crashed (or was killed)
+    leaked its headless Chrome forever — nothing else reaps it, because agent-browser merely
+    ATTACHED to it. A live owner is never touched; the PID is verified against the recorded
+    profile copy dir + start time before any kill.
+    """
+    from gateway.status import _pid_exists
+    from tools.browser_lightpanda import _tree_kill
+    _bt = _origin()
+    reaped = 0
+    try:
+        records = sorted(_chrome_state_dir().glob("*.json"))
+    except OSError as e:
+        _bt.logger.debug("real-profile chrome state dir unavailable: %s", e)
+        return 0
+    for record_path in records:
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record_path.unlink(missing_ok=True)
+            continue
+        owner_pid, pid = record.get("owner_pid"), record.get("pid")
+        if owner_pid == os.getpid():
+            # Ours: skip while THIS pid is still tracked in memory. A global "any chrome alive"
+            # check would spare a leaked pid just because a sibling launch is live.
+            if any(p.pid == pid and p.poll() is None for p in _bt._real_profile_chrome_procs):
+                continue
+        elif owner_pid and _pid_exists(int(owner_pid)):
+            continue  # another live Hermes owns it
+        if pid and _is_real_profile_chrome(int(pid), record.get("copy_dir"), record.get("start_time")):
+            try:
+                _tree_kill(int(pid), record.get("start_time"))
+                reaped += 1
+                _bt.logger.info("Reaped orphaned real-profile chrome pid %s", pid)
+            except Exception as e:
+                _bt.logger.debug("orphan real-profile chrome kill failed for pid %s: %s", pid, e)
+        record_path.unlink(missing_ok=True)
+    return reaped
+
+
 def _terminate_real_profile_chrome() -> None:
     """Terminate real-browser processes launched for real-profile sessions (idempotent, atexit-safe);
     agent-browser only ATTACHED to them, so its own session cleanup never kills them."""
@@ -31,6 +114,8 @@ def _terminate_real_profile_chrome() -> None:
     _bt = _origin()
     while _bt._real_profile_chrome_procs:
         _terminate(_bt._real_profile_chrome_procs.pop(), what="real-profile chrome")
+    for record_path in _chrome_state_dir().glob(f"*-{os.getpid()}.json"):
+        record_path.unlink(missing_ok=True)
 
 
 def _bounded_attach_run(argv, *, timeout: float, env=None):
@@ -221,6 +306,7 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
     except (subprocess.SubprocessError, OSError) as e:
         return None, f"{_RP}the launch failed: {e}"
     _bt._real_profile_chrome_procs.append(chrome_proc)
+    _record_real_profile_chrome(chrome_proc, copy_dir)
 
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
