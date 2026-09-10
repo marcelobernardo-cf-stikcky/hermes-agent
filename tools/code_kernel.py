@@ -23,6 +23,7 @@ import logging
 import os
 import queue
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -472,8 +473,42 @@ def _reap_idle_kernels_forever() -> None:
             logger.exception("idle kernel reaper sweep failed")
 
 
+def _sweep_orphaned_kernel_dirs() -> None:
+    """Remove old staging dirs only when no live process still references them."""
+    try:
+        import psutil
+        _, idle_timeout = _lifecycle_limits()
+        cutoff = time.time() - 2 * idle_timeout
+        candidates = Path(tempfile.gettempdir()).glob("hermes_kernel_*")
+        referenced = set()
+        # ponytail: cmdline+cwd, nunca open_files — medido nesta maquina, 385
+        # processos: 0.02s vs 15.00s, e isto roda no IMPORT do modulo. Um kernel
+        # vivo sempre cita seu tmpdir no argv (`<tmpdir>/hermes_kernel_runner.py`)
+        # ou no cwd, entao open_files nao acrescenta deteccao — so custo.
+        for process in psutil.process_iter(["cmdline", "cwd"]):
+            try:
+                values = [process.info.get("cwd") or ""]
+                values.extend(process.info.get("cmdline") or [])
+                referenced.update(str(value) for value in values if value)
+            except (psutil.Error, OSError):
+                continue
+        for directory in candidates:
+            try:
+                if directory.stat().st_mtime >= cutoff:
+                    continue
+                path = str(directory)
+                if any(path == value or path in value for value in referenced):
+                    continue
+                shutil.rmtree(directory, onerror=lambda func, name, _: (os.chmod(name, 0o700), func(name)))
+            except (OSError, shutil.Error):
+                logger.warning("kernel staging sweep failed for %s", directory, exc_info=True)
+    except Exception:
+        logger.exception("kernel staging sweep failed")
+
+
 _REAPER_STOP = threading.Event()
 _REAPER_INTERVAL_S = 60
+_sweep_orphaned_kernel_dirs()
 threading.Thread(target=_reap_idle_kernels_forever, daemon=True, name="hermes-kernel-reaper").start()
 atexit.register(_REAPER_STOP.set)
 

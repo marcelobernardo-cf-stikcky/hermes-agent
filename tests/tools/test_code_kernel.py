@@ -41,7 +41,7 @@ def _force_local_terminal(monkeypatch):
 
 
 from tools.code_execution_tool import build_execute_code_schema, execute_code
-from tools.code_kernel import _KERNELS, shutdown_all_kernels
+from tools.code_kernel import _KERNELS, _sweep_orphaned_kernel_dirs, shutdown_all_kernels
 
 
 @contextmanager
@@ -333,6 +333,25 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
             self.assertNotIn(stale.key, _KERNELS)
             stale.proc.wait(timeout=10)
             self.assertFalse(stale.alive())
+
+    def test_boot_sweep_removes_old_orphans_but_preserves_live_kernel_dir(self):
+        import tools.code_kernel as code_kernel
+
+        with tempfile.TemporaryDirectory() as tempdir, patch.object(code_kernel.tempfile, "gettempdir", return_value=tempdir), _kernel_config(kernel_idle_timeout=1):
+            orphan = Path(tempdir, "hermes_kernel_orphan")
+            live = Path(tempdir, "hermes_kernel_live")
+            orphan.mkdir()
+            live.mkdir()
+            class Process:
+                info = {"cwd": "", "cmdline": [str(live)]}
+
+            with patch("psutil.process_iter", return_value=[Process()]):
+                old = time.time() - 3
+                os.utime(orphan, (old, old))
+                os.utime(live, (old, old))
+                _sweep_orphaned_kernel_dirs()
+            self.assertFalse(orphan.exists())
+            self.assertTrue(live.exists())
 
     def test_parallel_cells_share_one_kernel_process(self):
         """Parallel cells for one owner race the first spawn. Each racer
