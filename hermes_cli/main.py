@@ -3318,6 +3318,19 @@ def main():
     except Exception:
         pass
 
+    # Windows: die with our whole child tree. The CLI is the spawner of every
+    # terminal/test/browser child, and an unclean exit (kill, crash, Desktop
+    # teardown) runs no atexit — so those children survive as orphans forever
+    # (measured: 88 orphan procs / 720 MB / 500 MB of leaked temp dirs from one
+    # day of use). ``gateway/run.py`` and ``web_server.py`` already self-attach;
+    # the CLI entry point was the hole. BREAKAWAY_OK keeps the update relaunch
+    # (``windows_detach_flags()``) escaping as before. Never fatal.
+    try:
+        from hermes_cli.process_identity import attach_self_to_kill_on_close_job
+        attach_self_to_kill_on_close_job()
+    except Exception:
+        pass
+
     # Sweep stale ``hermes.exe.old.*`` quarantine files from previous Windows
     # updates (see ``_quarantine_running_hermes_exe``). No-op elsewhere.
     try:
