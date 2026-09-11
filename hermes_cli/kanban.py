@@ -829,8 +829,10 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
 
     verdict, reason = "done", ""
     try:
-        verdict, reason, _, _, _ = judge_goal(goal=f"{task.title}\n\n{task.body or ''}".strip(),
+        verdict, reason, _, _, transport_failed = judge_goal(goal=f"{task.title}\n\n{task.body or ''}".strip(),
                                               last_response=evidence.strip())
+        if transport_failed:
+            verdict, reason = "done", ""
     except Exception as judge_exc:
         import logging as _logging
 
