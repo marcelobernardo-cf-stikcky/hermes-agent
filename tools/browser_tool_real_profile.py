@@ -6,11 +6,13 @@ State (``_REAL_PROFILE_SESSION``, ``_real_profile_cdp_lock``, ``_real_profile_cd
 through ``_bt`` (resolved per call — never import ``tools.browser_tool`` at import time).
 """
 
+import json
 import os
 import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional, Tuple
 from tools.browser_tool_origin import origin_module as _origin
 from tools import browser_tool_cloud as _cloud
@@ -19,6 +21,90 @@ from tools import browser_tool_lightpanda_fallback as _lp
 from tools import browser_tool_session as _session
 
 _RP = "browser.use_real_profile is on, but "
+def _remaining(deadline: Optional[float]) -> Optional[float]:
+    """Seconds left before *deadline* (a ``time.monotonic()`` budget), or None when unbounded."""
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def _chrome_state_dir():
+    """On-disk records of Chromes we launched, so a crashed owner's browser is still reapable."""
+    from hermes_constants import get_hermes_home
+    path = Path(get_hermes_home()) / "cache" / "browser-use" / "real-profile-chrome"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _record_real_profile_chrome(proc, copy_dir: str) -> None:
+    """Record a launched Chrome (best-effort). Keyed by our PID so two owners never clobber.
+
+    Never raises: a failed record costs a later reap, but must not fail the launch itself.
+    """
+    from gateway.status import get_process_start_time
+    try:
+        pid = proc.pid if not isinstance(proc, int) else proc
+        record = {"pid": pid, "owner_pid": os.getpid(), "copy_dir": copy_dir,
+                  "start_time": get_process_start_time(pid), "started_at": time.time()}
+        (_chrome_state_dir() / f"{os.path.basename(copy_dir)}-{os.getpid()}.json").write_text(
+            json.dumps(record), encoding="utf-8")
+    except Exception as e:
+        _origin().logger.debug("could not write real-profile chrome record: %s", e)
+
+
+def _is_real_profile_chrome(pid: int, copy_dir, start_time) -> bool:
+    """True only when ``pid`` is verifiably the Chrome we launched on our own profile copy."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        if not any(f"--user-data-dir={copy_dir}" == a for a in proc.cmdline()):
+            return False
+        if start_time:
+            from gateway.status import get_process_start_time
+            return get_process_start_time(pid) == start_time
+    except Exception:
+        return False
+    return True
+
+
+def reap_orphaned_real_profile_chrome() -> int:
+    """Kill real-profile Chromes whose owning Hermes is gone; return the count.
+
+    ``_real_profile_chrome_procs`` is in-memory only, so an owner that crashed (or was killed)
+    leaked its headless Chrome forever — nothing else reaps it, because agent-browser merely
+    ATTACHED to it. A live owner is never touched; the PID is verified against the recorded
+    profile copy dir + start time before any kill.
+    """
+    from gateway.status import _pid_exists
+    from tools.browser_lightpanda import _tree_kill
+    _bt = _origin()
+    reaped = 0
+    try:
+        records = sorted(_chrome_state_dir().glob("*.json"))
+    except OSError as e:
+        _bt.logger.debug("real-profile chrome state dir unavailable: %s", e)
+        return 0
+    for record_path in records:
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record_path.unlink(missing_ok=True)
+            continue
+        owner_pid, pid = record.get("owner_pid"), record.get("pid")
+        if owner_pid == os.getpid():
+            # Ours: skip while THIS pid is still tracked in memory. A global "any chrome alive"
+            # check would spare a leaked pid just because a sibling launch is live.
+            if any(p.pid == pid and p.poll() is None for p in _bt._real_profile_chrome_procs):
+                continue
+        elif owner_pid and _pid_exists(int(owner_pid)):
+            continue  # another live Hermes owns it
+        if pid and _is_real_profile_chrome(int(pid), record.get("copy_dir"), record.get("start_time")):
+            try:
+                _tree_kill(int(pid), record.get("start_time"))
+                reaped += 1
+                _bt.logger.info("Reaped orphaned real-profile chrome pid %s", pid)
+            except Exception as e:
+                _bt.logger.debug("orphan real-profile chrome kill failed for pid %s: %s", pid, e)
+        record_path.unlink(missing_ok=True)
+    return reaped
 
 
 def _terminate_real_profile_chrome() -> None:
@@ -28,6 +114,37 @@ def _terminate_real_profile_chrome() -> None:
     _bt = _origin()
     while _bt._real_profile_chrome_procs:
         _terminate(_bt._real_profile_chrome_procs.pop(), what="real-profile chrome")
+    for record_path in _chrome_state_dir().glob(f"*-{os.getpid()}.json"):
+        record_path.unlink(missing_ok=True)
+
+
+def _bounded_attach_run(argv, *, timeout: float, env=None):
+    """Bounded run of the agent-browser ATTACH call; None on timeout.
+
+    Output goes to FILES via ``_popen_agent_browser``, never pipes: this command is the one
+    that FORKS the daemon, the daemon inherits the captured fds, and a pipe therefore never
+    sees EOF while the daemon lives — so every capture_output run of it burns the full
+    timeout even though the attach itself finished. Measured back to back on one live Chrome:
+    piped `--cdp <port> open about:blank` timed out at 41s, the same command against the
+    already-running daemon (no fork) returned in 0.2s. ``subprocess.run`` also cannot be
+    rescued by a bigger timeout — its post-timeout cleanup calls an UNBOUNDED communicate().
+    """
+    socket_dir = _session._prepare_session_socket_dir(_origin()._REAL_PROFILE_SESSION)
+    stdout_path = os.path.join(socket_dir, "_stdout_attach")
+    stderr_path = os.path.join(socket_dir, "_stderr_attach")
+    try:
+        proc = _session._popen_agent_browser(list(argv), env or {}, socket_dir, "attach")
+    except OSError:
+        return None
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return None
+    stdout, stderr = _session._read_command_output_files(stdout_path, stderr_path)
+    _session._unlink_command_output_files(stdout_path, stderr_path)
+    return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
 
 
 def _cdp_http_ready(http_cdp: str) -> bool:
@@ -48,25 +165,43 @@ def _real_profile_daemon_env() -> dict:
     return env
 
 
-def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str) -> Optional[subprocess.CompletedProcess]:
-    """Run ``agent-browser --session <name> <cmd...>``; None when agent-browser is missing or the run fails."""
+def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str,
+                               deadline: Optional[float] = None) -> Optional[subprocess.CompletedProcess]:
+    """Run ``agent-browser --session <name> <cmd...>``; None when agent-browser is missing, the deadline
+    has already passed, or the run fails/times out.
+
+    Uses :func:`hermes_cli._subprocess_compat.bounded_probe_run`, not ``subprocess.run(timeout=...)``: on
+    Windows, ``run()``'s post-timeout cleanup calls an unbounded ``communicate()`` after killing only the
+    direct child, and a surviving descendant holding duplicated pipe handles blocks that join forever —
+    proven on this exact Windows Python (``browser-timeout-native-probe.py``: a requested 0.3s timeout
+    returned after 4.1s). ``bounded_probe_run`` bounds ``communicate()`` itself and tree-kills on failure.
+    """
+    remaining = _remaining(deadline)
+    if remaining is not None and remaining <= 0:
+        return None
     _bt = _origin()
     try:
         browser_cmd = _install._find_agent_browser()
     except FileNotFoundError:
         return None
-    try:
-        return subprocess.run([*_session._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
-                              env=_real_profile_daemon_env(), stdin=subprocess.DEVNULL)
-    except (subprocess.SubprocessError, OSError) as e:
-        _bt.logger.debug("real-profile %s failed: %s", log_label, e)
-        return None
+    # bounded_probe_run, not subprocess.run(timeout=): on Windows run()'s post-timeout cleanup
+    # calls an unbounded communicate() after killing only the direct child (proven: a 0.3s
+    # timeout returned after 4.1s). env comes from _real_profile_daemon_env() so the daemon's
+    # socket dir stays reaper-visible (#100855).
+    from hermes_cli._subprocess_compat import bounded_probe_run
+    timeout = 15.0 if remaining is None else min(15.0, remaining)
+    result = bounded_probe_run(
+        [*_session._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
+        timeout=timeout, env=_real_profile_daemon_env(),
+    )
+    if result is None:
+        _bt.logger.debug("real-profile %s failed or timed out after %.1fs", log_label, timeout)
+    return result
 
 
-def _agent_browser_get_cdp(session_name: str) -> Optional[str]:
+def _agent_browser_get_cdp(session_name: str, deadline: Optional[float] = None) -> Optional[str]:
     """HTTP CDP discovery root of an agent-browser session (from its ``ws://`` cdp-url), or None."""
-    proc = _agent_browser_session_cmd(session_name, "get", "cdp-url", log_label="get cdp-url")
+    proc = _agent_browser_session_cmd(session_name, "get", "cdp-url", log_label="get cdp-url", deadline=deadline)
     m = re.search(r"ws://127\.0\.0\.1:(\d+)/", (proc.stdout or "").strip()) if proc is not None else None
     return f"http://127.0.0.1:{m.group(1)}" if m else None
 
@@ -107,16 +242,16 @@ def _cdp_on_data_dir(http_cdp: str, data_dir: str) -> bool:
     return bool(m) and _read_devtools_port(data_dir) == m.group(1)
 
 
-def _agent_browser_close_session(session_name: str) -> None:
+def _agent_browser_close_session(session_name: str, deadline: Optional[float] = None) -> None:
     """Best-effort close of an agent-browser session (stale/wrong-dir cleanup)."""
-    _agent_browser_session_cmd(session_name, "close", log_label="session close")
+    _agent_browser_session_cmd(session_name, "close", log_label="session close", deadline=deadline)
 
 
 _REAL_PROFILE_CHROME_FLAGS = (
     "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-default-apps",
     "--disable-hang-monitor", "--disable-popup-blocking", "--disable-prompt-on-repost",
-    "--disable-sync", "--disable-features=Translate", "--no-startup-window",
+    "--disable-sync", "--disable-features=Translate",
 )
 
 
@@ -158,20 +293,30 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
     AGENT_BROWSER_HEADED opts into a window, except on a display-less Linux host (launch would die).
     """
     _bt = _origin()
+    # Deleted, not kept: _read_devtools_port below polls this same file for the NEW port, so a
+    # file left by a dead Chrome is returned instantly and the attach targets a dead port
+    # (measured: launch returned 51008 in 0s, nothing listening). Any still-alive Chrome on this
+    # dir was already claimed by _surviving_chrome_cdp before we get here.
     try:
-        os.unlink(os.path.join(copy_dir, "DevToolsActivePort"))  # stale port confuses reuse probes
+        os.unlink(os.path.join(copy_dir, "DevToolsActivePort"))
     except OSError:
         pass
     chrome_argv = [real_binary, f"--user-data-dir={copy_dir}", *_REAL_PROFILE_CHROME_FLAGS]
     _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not (_cloud._is_headed_mode() and (_has_display or not sys.platform.startswith("linux"))):
         chrome_argv.append("--headless=new")
+        # Headless has no window to suppress; headed MUST get one, or the user
+        # consented to watch and sees nothing. `--no-startup-window` used to sit
+        # in the flag tuple unconditionally, so browser.headed was a no-op here:
+        # measured 15 chrome processes and 0 visible windows.
+        chrome_argv.append("--no-startup-window")
     try:
         chrome_proc = subprocess.Popen(chrome_argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        stdin=subprocess.DEVNULL, start_new_session=True, env=_bt._build_browser_env())
     except (subprocess.SubprocessError, OSError) as e:
         return None, f"{_RP}the launch failed: {e}"
     _bt._real_profile_chrome_procs.append(chrome_proc)
+    _record_real_profile_chrome(chrome_proc, copy_dir)
 
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
@@ -199,14 +344,21 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
         return None, f"{_RP}the local browser engine (agent-browser) is not installed: {e}"
     argv = [*_session._agent_browser_argv(browser_cmd), "--session", _bt._REAL_PROFILE_SESSION,
             "--cdp", str(port), "open", "about:blank"]
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=_bt._get_open_command_timeout(first_open=True), env=_real_profile_daemon_env(),
-                              stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
+    # `bounded_probe_run`, not `subprocess.run(timeout=)`: the agent-browser child leaves
+    # descendants holding duplicates of the captured pipes, and on Windows run()'s
+    # post-timeout cleanup calls an UNBOUNDED communicate() after killing only the direct
+    # child — the pipes never reach EOF and the wait blocks forever. Proven both ways: a
+    # faulthandler stack pinned this line while browser_exec(timeout_s=20) ran past 40s,
+    # and reverting to run() reproduces the hang while this call returns in ~8s.
+    proc = _bounded_attach_run(argv, timeout=_bt._get_open_command_timeout(first_open=True),
+                              env=_real_profile_daemon_env())
+    if proc is None:
+        # The attach CLI can outlive its parent while its daemon finishes the first cold start.
+        # If that daemon already exposes our profile, the work succeeded; do not report a timeout.
+        cdp = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+        if cdp and _cdp_http_ready(cdp) and _cdp_on_data_dir(cdp, copy_dir):
+            return cdp, None
         return None, _RP + "the real-profile browser took too long to start. Retry, or turn the toggle off."
-    except (subprocess.SubprocessError, OSError) as e:
-        return None, f"{_RP}the launch failed: {e}"
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, f"{_RP}the real-profile browser failed to start: {tail[-1] if tail else f'exit {proc.returncode}'}"
@@ -219,13 +371,18 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
     return cdp, None
 
 
-def _real_profile_cdp() -> tuple:
+def _real_profile_cdp(deadline: Optional[float] = None) -> tuple:
     """Resolve ``(cdp_url, error)`` for consented real-profile browsing.
 
     Snapshot -> launch real binary on the copy -> return its HTTP CDP endpoint. The copy is a
     non-default dir, so it sidesteps the Chrome >=136 default-profile remote-debugging block and
     never contends with the user's running browser. One shared agent-browser session is reused
     across calls (cached, re-validated). ``(None, message)`` fail-closed; ``(None, None)`` when consent is off.
+
+    ``deadline`` (a ``time.monotonic()`` budget, set by ``browser_exec`` before setup starts) is threaded
+    through every blocking sub-step (stale-session close, CDP probes) and re-checked before each remaining
+    step; setup that would start past the deadline fails closed with an actionable message instead of
+    running unbounded on top of the caller's already-spent budget (#94500).
     """
     _bt = _origin()
     if not _cloud._use_real_profile():
@@ -246,7 +403,8 @@ def _real_profile_cdp() -> tuple:
                       "Set browser.engine to 'auto' or 'chrome' to use real-profile browsing, or turn the toggle off.")
 
     from hermes_cli.browser_connect import (chromium_executable, detect_default_chromium,
-                                            real_profile_copy_dir, snapshot_real_profile)
+                                            first_installed_chromium, real_profile_copy_dir,
+                                            snapshot_real_profile)
 
     with _bt._real_profile_cdp_lock:
         cached = _bt._real_profile_cdp_cache.get("cdp")
@@ -258,6 +416,11 @@ def _real_profile_cdp() -> tuple:
         _bt._real_profile_cdp_cache.pop("cdp", None)
 
         browser = detect_default_chromium()
+        if browser is None:
+            # OS default is Opera/Firefox/Safari/etc. Chrome is still installed —
+            # use it rather than fail closed (which dumps the agent onto a Store
+            # stub or packaged Playwright Chromium that never shows a window).
+            browser = first_installed_chromium()
         unsupported = _real_profile_unsupported_reason(browser)
         if unsupported:
             return None, unsupported
@@ -266,12 +429,17 @@ def _real_profile_cdp() -> tuple:
         # Cookies / Login Data) must NOT run while a live copy-browser (maybe from a previous
         # hermes process) holds the user-data-dir open — that corrupts the databases.
         copy_dir = real_profile_copy_dir(browser)
-        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION, deadline=deadline)
         if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
             _bt._real_profile_cdp_cache["cdp"] = existing
             return existing, None
-        if existing:  # stale/wrong-dir session: close it so nothing holds the dir open
-            _agent_browser_close_session(_bt._REAL_PROFILE_SESSION)
+        # Unconditional close, not `if existing:` — the daemon caches its CDP port in its own env
+        # for its whole life, so after the Chrome it attached to dies it keeps answering (and
+        # re-attaching) with that dead port forever, which `get cdp-url` reports as
+        # "All CDP discovery methods failed for 127.0.0.1:<dead port>" and never as a usable url.
+        # A missing/failed `existing` is exactly that case, so the reusable-CDP miss must kill the
+        # daemon too, or every later launch attaches to the stale port. Costs ~0.2s with no daemon.
+        _agent_browser_close_session(_bt._REAL_PROFILE_SESSION, deadline=deadline)
         # A Chrome from an earlier hermes process can still hold the copy dir after its attach
         # daemon was reaped (that owner died). Re-attach to it rather than overlay a live profile;
         # if the daemon cannot attach, fail closed — never snapshot over an open profile. Not ours
@@ -285,15 +453,27 @@ def _real_profile_cdp() -> tuple:
             _bt.logger.info("real-profile: re-attached to surviving Chrome at %s (%s)", cdp, copy_dir)
             return cdp, None
 
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            return None, (_RP + "setup (closing a stale automation session) already used the whole call "
+                          "timeout. Retry with a larger timeout_s, or turn the toggle off.")
         copy_dir, err = snapshot_real_profile(browser)
         if err or not copy_dir:
             return None, _real_profile_snapshot_error(err)
         real_binary = chromium_executable(browser)
         if real_binary is None:
             return None, f"{_RP}the real browser binary for '{browser}' could not be found. Reinstall it or turn the toggle off."
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            return None, (_RP + "the profile snapshot used the whole call timeout, leaving none to launch "
+                          "the browser. Retry with a larger timeout_s, or turn the toggle off.")
         port, err = _launch_real_profile_chrome(real_binary, copy_dir)
         if port is None:
             return None, err
+        remaining = _remaining(deadline)
+        if remaining is not None and remaining <= 0:
+            return None, (_RP + "launching the real browser used the whole call timeout, leaving none to "
+                          "attach to it. Retry with a larger timeout_s, or turn the toggle off.")
         cdp, err = _attach_agent_browser_to_real_profile(port, copy_dir)
         if not cdp:
             return None, err

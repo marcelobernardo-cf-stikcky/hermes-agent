@@ -357,6 +357,10 @@ def _reap_orphaned_browser_sessions():
         from tools.browser_lightpanda import reap_orphaned_lightpanda
         reap_orphaned_lightpanda()
     _best_effort("Lightpanda orphan reap", _reap_lp)
+    # Real-profile Chrome is launched directly (never by agent-browser), so it has no socket
+    # dir either and must be swept from its own records before the early return below.
+    _best_effort("Real-profile chrome orphan reap",
+                 _real_profile.reap_orphaned_real_profile_chrome)
 
     tmpdir = _bt._socket_safe_tmpdir()
     socket_dirs = []
