@@ -672,7 +672,7 @@ class TestEvaluateResult:
             self._spec(fail_closed=True),
             _spawn_result(returncode=1, stdout="", stderr="Traceback (most recent call last): ...\nZeroDivisionError"),
         )
-        assert r == {"action": "block", "message": "hook /tmp/h.sh failed closed: exited 1 with no output"}
+        assert r == {"action": "block", "message": "hook /tmp/h.sh failed closed: hook exited 1 with no directive"}
 
     def test_crash_empty_stdout_fails_open_by_default(self):
         r = shell_hooks._evaluate_result(

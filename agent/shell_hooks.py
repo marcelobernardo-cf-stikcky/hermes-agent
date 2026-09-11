@@ -365,11 +365,13 @@ def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[st
         logger.warning("shell hook exited %d (event=%s command=%s); stderr=%s",
                        r["returncode"], spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT])
     stdout = (r["stdout"] or "").strip()
-    if fail_closed and r["returncode"] != 0 and not stdout:
-        # The hook crashed (traceback on stderr, nothing on stdout) — a fail-closed gate
-        # must not silently allow just because the gate itself broke.
-        return _fail_closed_block(spec, f"exited {r['returncode']} with no output")
     parsed = _parse_response(spec.event, stdout)
+    if parsed is None and fail_closed and r["returncode"] != 0:
+        # The gate broke (crash, traceback, or JSON without a recognised directive)
+        # — a fail-closed hook must not allow just because it failed to speak.
+        # Checked after parsing so a non-zero exit that DOES carry a block directive
+        # still goes through the normal path. Matches upstream PR #102417.
+        return _fail_closed_block(spec, f"hook exited {r['returncode']} with no directive")
     if parsed is None and fail_closed and stdout and not _is_json_object(stdout):
         # A fail-closed gate must not silently allow on garbage stdout (e.g. a stack trace).
         return _fail_closed_block(spec, "unparseable stdout (expected a JSON object)")
