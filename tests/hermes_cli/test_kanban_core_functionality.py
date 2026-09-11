@@ -331,7 +331,7 @@ def test_enforce_max_runtime_applies_default_when_card_has_no_limit(kanban_home)
             tid = kb.create_task(conn, title="unbounded job", assignee="worker")
             assert kb.get_task(conn, tid).max_runtime_seconds is None
             kb.claim_task(conn, tid)
-            kb._set_worker_pid(conn, tid, os.getpid())
+            kbd._set_worker_pid(conn, tid, os.getpid())
             old_started = int(time.time()) - 120
             with kb.write_txn(conn):
                 conn.execute("UPDATE tasks SET started_at = ? WHERE id = ?", (old_started, tid))
@@ -1374,6 +1374,7 @@ def _drive_nonzero_crash(conn, tid, fake_pid):
     return _drive_worker_exit(conn, tid, fake_pid, 256)
 
 
+@pytest.mark.skipif(not hasattr(os, "WIFEXITED"), reason="exit-status classification needs POSIX wait macros (os.WIFEXITED); Windows returns unknown")
 def test_protocol_violation_budget_not_consumed_by_other_failures(kanban_home):
     """Mixed failure kinds must not consume the violation retry budget.
 

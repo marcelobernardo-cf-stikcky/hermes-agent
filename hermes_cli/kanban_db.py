@@ -1971,7 +1971,8 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     if not row:
         return False
     if row["kind"] == "timed_out":
-        return _json_dict(_row_get(row, "payload")).get("retry_status") == "blocked"
+        p = _json_dict(_row_get(row, "payload"))
+        return p.get("retry_status") == "blocked" and p.get("timeout_reason") == "iteration_budget"
     return row["kind"] == "blocked"
 
 
