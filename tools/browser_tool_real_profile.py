@@ -353,6 +353,11 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
     proc = _bounded_attach_run(argv, timeout=_bt._get_open_command_timeout(first_open=True),
                               env=_real_profile_daemon_env())
     if proc is None:
+        # The attach CLI can outlive its parent while its daemon finishes the first cold start.
+        # If that daemon already exposes our profile, the work succeeded; do not report a timeout.
+        cdp = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+        if cdp and _cdp_http_ready(cdp) and _cdp_on_data_dir(cdp, copy_dir):
+            return cdp, None
         return None, _RP + "the real-profile browser took too long to start. Retry, or turn the toggle off."
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()

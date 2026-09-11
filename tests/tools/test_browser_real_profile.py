@@ -246,6 +246,30 @@ class TestRealProfileCdpLaunch:
         assert cdp == "http://127.0.0.1:41000"
         self._reset()
 
+    def test_attach_timeout_reuses_daemon_that_finished(self):
+        """CLI timed out but its daemon already serves OUR copy dir -> reuse, never a timeout error."""
+        self._reset()
+        with patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=None), \
+             patch.object(bt_real_profile, "_agent_browser_get_cdp", return_value="http://127.0.0.1:41000"), \
+             patch.object(bt_real_profile, "_cdp_http_ready", return_value=True), \
+             patch.object(bt_real_profile, "_cdp_on_data_dir", return_value=True):
+            cdp, err = bt_real_profile._attach_agent_browser_to_real_profile(41000, "/copy/dir")
+        assert err is None
+        assert cdp == "http://127.0.0.1:41000"
+
+    def test_attach_timeout_on_foreign_data_dir_still_fails_closed(self):
+        """Same timeout, but the daemon serves SOMEONE ELSE's dir -> must stay an error."""
+        self._reset()
+        with patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=None), \
+             patch.object(bt_real_profile, "_agent_browser_get_cdp", return_value="http://127.0.0.1:41000"), \
+             patch.object(bt_real_profile, "_cdp_http_ready", return_value=True), \
+             patch.object(bt_real_profile, "_cdp_on_data_dir", return_value=False):
+            cdp, err = bt_real_profile._attach_agent_browser_to_real_profile(41000, "/copy/dir")
+        assert cdp is None
+        assert err and "took too long to start" in err
+
     def test_snapshot_failure_fails_closed(self):
         self._reset()
         with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
