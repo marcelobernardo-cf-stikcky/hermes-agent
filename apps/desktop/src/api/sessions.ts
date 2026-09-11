@@ -452,13 +452,15 @@ export function getSessionMessages(
 export const LATEST_SESSION_MESSAGES_LIMIT = 120
 
 export function getLatestSessionMessages(id: string, profile?: ProfileScope): Promise<SessionMessagesResponse> {
-  // The Desktop transcript is the active display view. Compacted rows remain
-  // durable for session_search, but must not be materialized as duplicate
-  // bubbles in the transcript.
+  // includeCompacted: durable display history must include rows preserved by
+  // in-place compaction (active=0, compacted=1); without them the transcript
+  // silently ends at the compaction boundary and earlier turns are unreachable.
+  // Duplicate bubbles are handled downstream by activeTranscriptRows, which
+  // keeps only the active generation when the backend sends both.
   return getSessionMessages(id, profile, {
     limit: LATEST_SESSION_MESSAGES_LIMIT,
     order: 'latest',
-    includeCompacted: false
+    includeCompacted: true
   }).then(page => {
     const activePage = { ...page, messages: activeTranscriptRows(page.messages) }
 
@@ -532,7 +534,7 @@ export function getOlderSessionMessages(
   offset: number,
   limit: number = LATEST_SESSION_MESSAGES_LIMIT
 ): Promise<SessionMessagesResponse> {
-  return getSessionMessages(id, profile, { includeCompacted: false, limit, offset, order: 'latest' }).then(page => ({
+  return getSessionMessages(id, profile, { includeCompacted: true, limit, offset, order: 'latest' }).then(page => ({
     ...page,
     messages: activeTranscriptRows(page.messages)
   }))
