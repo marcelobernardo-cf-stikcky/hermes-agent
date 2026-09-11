@@ -333,7 +333,13 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
     assert "pythonw.exe" in content
     assert "hermes_cli.main" in content
     assert "gateway run" in content
-    assert ", 0, False" in content  # hidden window, detached/async
+    assert ", 0, True" in content  # hidden window, wait for supervised child
+    assert ", 0, False" not in content
+    assert "Dim sh, env, existing_pp, exit_code" in content
+    assert "Do" in content and "Loop" in content
+    assert "exit_code = sh.Run" in content
+    assert "If exit_code = 0 Or exit_code = 78 Then" in content
+    assert "WScript.Sleep 5000" in content
     for var in ("HERMES_HOME", "PYTHONIOENCODING", "HERMES_GATEWAY_DETACHED", "VIRTUAL_ENV", "PYTHONPATH"):
         assert var in content
     assert "--profile" in content and "work" in content
@@ -349,11 +355,61 @@ def test_gateway_vbs_script_is_console_less(monkeypatch):
 
 
 
+@pytest.mark.windows_only
+def test_spawn_supervised_launches_hidden_wscript(monkeypatch, tmp_path):
+    """The persistent launcher must own the gateway child process lifetime."""
+    script_path = tmp_path / "Hermes_Gateway_alice.vbs"
+    script_path.write_text("' test supervisor\r\n", encoding="utf-8")
+    cmd_path = script_path.with_suffix(".cmd")
+    system_root = tmp_path / "Windows"
+    wscript_path = system_root / "System32" / "wscript.exe"
+    wscript_path.parent.mkdir(parents=True)
+    wscript_path.write_text("", encoding="utf-8")
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(pid=54321)
+
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: cmd_path)
+    monkeypatch.setenv("SystemRoot", str(system_root))
+    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(gateway_windows.subprocess, "Popen", fake_popen)
+
+    assert gateway_windows._spawn_supervised() == 54321
+
+    assert len(calls) == 1
+    actual_argv, kwargs = calls[0]
+    assert actual_argv == [str(wscript_path), "//B", "//Nologo", str(script_path)]
+    assert kwargs["cwd"] == str(tmp_path)
+    assert kwargs["creationflags"] == gateway_windows.windows_detach_flags()
+    assert kwargs["env"]["_HERMES_GATEWAY_BREAKAWAY"] == "1"
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is kwargs["stderr"]
 
 
+@pytest.mark.windows_only
+def test_start_uses_vbs_supervisor_when_login_launcher_exists(monkeypatch):
+    """Manual starts must not bypass an installed persistent supervisor."""
+    calls = []
 
-# ---------------------------------------------------------------------------
-# stop() drain semantics — issue #33778
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_print_start_attestation_warning", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
+    monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: False)
+    monkeypatch.setattr(gateway_windows, "is_startup_entry_installed", lambda: True)
+    monkeypatch.setattr(
+        gateway_windows,
+        "_spawn_supervised",
+        lambda: calls.append("supervised") or 54321,
+    )
+    monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda: calls.append("direct"))
+    monkeypatch.setattr(gateway_windows, "_report_gateway_start", lambda via: calls.append(via))
+
+    gateway_windows.start()
+
+    assert calls == ["supervised", "VBS supervisor (PID 54321)"]
 #
 # Background: on Windows, asyncio.add_signal_handler raises NotImplementedError,
 # so the gateway's SIGTERM handler (which drains in-flight agents and writes

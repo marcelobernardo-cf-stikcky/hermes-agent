@@ -387,6 +387,35 @@ def test_heartbeat_write_is_awaited_so_a_frozen_loop_still_goes_stale():
     )
 
 
+@pytest.mark.windows_only
+def test_loop_heartbeat_skips_unix_witness_on_native_windows(
+    monkeypatch, tmp_path, caplog
+):
+    """Native Windows must fail safe without probing unsupported AF_UNIX."""
+    unix_calls = []
+
+    async def unexpected_unix_server(*_args, **_kwargs):
+        unix_calls.append(True)
+        raise AssertionError("native Windows must not call start_unix_server")
+
+    monkeypatch.setattr(
+        asyncio, "start_unix_server", unexpected_unix_server, raising=False
+    )
+    with patch("gateway.shutdown_watchdog.write_loop_heartbeat") as heartbeat:
+        asyncio.run(
+            loop_heartbeat_forever(
+                interval_s=60.0,
+                home=tmp_path,
+                should_continue=lambda: False,
+            )
+        )
+
+    assert unix_calls == []
+    heartbeat.assert_called_once()
+    assert heartbeat.call_args.kwargs["extra"] == {"loop_tick_socket": False}
+    assert "Loop tick socket unavailable" not in caplog.text
+
+
 def test_loop_scheduling_witness_is_served_by_the_loop_itself():
     """The tick socket must be armed on the loop, never in a thread.
 
