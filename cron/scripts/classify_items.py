@@ -134,6 +134,10 @@ def _render_text(surfaced: list) -> str:
     for i, item, s in surfaced:
         title = item.get("title") or item.get("subject") or item.get("summary") or _item_id(item, i)
         block = f"## [{s.get('score')}/10] {title}"
+        # Without the sender a downstream summariser has to invent an attribution
+        # ("Manager:") for mail items, so pass it through when the item carries one.
+        if sender := item.get("from") or item.get("sender") or "":
+            block += f"\nFrom: {sender}"
         if url := item.get("url") or item.get("link") or "":
             block += f"\n{url}"
         if reason := s.get("reason", ""):

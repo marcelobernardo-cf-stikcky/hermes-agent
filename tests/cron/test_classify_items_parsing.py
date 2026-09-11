@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from cron.scripts.classify_items import _build_prompt, _parse_scores
+from cron.scripts.classify_items import _build_prompt, _parse_scores, _render_text
 
 
 def _one(**obj) -> str:
@@ -52,3 +52,17 @@ def test_prompt_states_the_key_names_it_parses():
     # be a schema the parser accepts.
     prompt = _build_prompt([{"subject": "hi"}], "Urgent if it mentions a deadline.")
     assert all(key in prompt for key in ("index", "score", "reason"))
+
+
+def test_rendered_item_carries_the_sender():
+    # A summariser downstream can only attribute mail it can see the sender of; dropping
+    # "from" made one invent "Manager:" for a message signed by a named colleague.
+    item = {"subject": "OK no roteiro?", "from": "Ana Paula <ana.paula@tapps.com.br>"}
+    rendered = _render_text([(0, item, {"score": 9, "reason": "deadline hoje"})])
+    assert "Ana Paula" in rendered
+    assert "OK no roteiro?" in rendered
+
+
+def test_rendered_item_without_sender_has_no_empty_from_line():
+    rendered = _render_text([(0, {"title": "RSS post"}, {"score": 8, "reason": "x"})])
+    assert "From:" not in rendered
