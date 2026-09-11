@@ -10,6 +10,7 @@ import pytest
 
 from agent.error_classifier import FailoverReason
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_dispatch as kbd
 from run_agent import AIAgent
 
 
@@ -85,7 +86,7 @@ def test_dispatcher_reserves_orchestrator_provider(monkeypatch: pytest.MonkeyPat
             return_value="openai-codex",
         ),
     ):
-        assert kb._resolve_kanban_reserved_providers(None) == ["openai-codex"]
+        assert kbd._resolve_kanban_reserved_providers(None) == ["openai-codex"]
 
 
 def test_reserved_openai_codex_is_skipped_before_client_resolution(

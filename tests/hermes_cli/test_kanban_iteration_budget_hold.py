@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_dispatch as kbd
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def _claimed(conn, title="iteration budget job", **create_kwargs):
 
 
 def _iteration_timeout(conn, tid, *, failure_limit=2):
-    return kb._record_task_failure(
+    return kbd._record_task_failure(
         conn,
         tid,
         error="Iteration budget exhausted (90/90) — task could not complete "
@@ -93,7 +94,7 @@ def test_iteration_budget_timeout_still_counts_toward_breaker(kanban_home):
     conn = kb.connect()
     try:
         tid = _claimed(conn)
-        crashed = kb._record_task_failure(
+        crashed = kbd._record_task_failure(
             conn, tid, "pid 991111 exited with code 1",
             outcome="crashed", failure_limit=2,
             release_claim=True, end_run=True,
@@ -124,7 +125,7 @@ def test_isolated_crash_still_retries(kanban_home, all_assignees_spawnable):
     conn = kb.connect()
     try:
         tid = _claimed(conn)
-        crashed = kb._record_task_failure(
+        crashed = kbd._record_task_failure(
             conn, tid, "pid 991112 exited with code 1",
             outcome="crashed", failure_limit=2,
             release_claim=True, end_run=True,
@@ -152,7 +153,7 @@ def test_wall_clock_timeout_retries_and_labels_reason(kanban_home, monkeypatch):
             conn, title="wall clock job", assignee="worker", max_runtime_seconds=1,
         )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kbd._set_worker_pid(conn, tid, os.getpid())
         old_started = int(time.time()) - 30
         with kb.write_txn(conn):
             conn.execute(
@@ -241,7 +242,7 @@ def test_stale_worker_iteration_timeout_does_not_clobber_successor_run(
         run_b = claimed_b.current_run_id
         assert run_b is not None
         assert run_b != run_a
-        kb._set_worker_pid(conn, tid, 900002)
+        kbd._set_worker_pid(conn, tid, 900002)
     finally:
         conn.close()
 

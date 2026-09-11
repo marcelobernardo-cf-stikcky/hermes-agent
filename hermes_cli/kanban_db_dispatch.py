@@ -479,6 +479,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                     "limit_seconds": limit,
                     "sigkill": killed,
                     "retry_status": retry_status,
+                    "timeout_reason": "wall_clock",
                 }
                 run_id = _kb._end_run(
                     conn, tid, outcome="timed_out", status="timed_out",
@@ -993,6 +994,8 @@ def _record_task_failure(
     force_trip: bool = False,
     release_claim: bool = False,
     end_run: bool = False,
+    hold: bool = False,
+    expected_run_id: Optional[int] = None,
     event_payload_extra: Optional[dict] = None,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
@@ -1017,11 +1020,16 @@ def _record_task_failure(
         ).fetchone()
         if row is None:
             return False
+        if expected_run_id is not None and row["current_run_id"] != expected_run_id:
+            _kb._append_event(conn, task_id, "superseded_run", {"reason": "superseded_run", "trigger_outcome": outcome, "expected_run_id": expected_run_id, "actual_run_id": row["current_run_id"]}, run_id=expected_run_id)
+            return False
         retry_status = (
             _kb._retry_status_for_run(conn, task_id, row["current_run_id"])
             if release_claim
             else ("review" if row["status"] == "review" else "ready")
         )
+        if hold:
+            retry_status = "blocked"
         failures = int(row["consecutive_failures"]) + 1
 
         # Per-task override wins over caller-supplied and default thresholds.
@@ -1055,7 +1063,7 @@ def _record_task_failure(
                 )
                 _kb._append_event(
                     conn, task_id, outcome,
-                    {"error": error, "failures": failures, "retry_status": retry_status},
+                    {**{"error": error, "failures": failures, "retry_status": retry_status}, **(event_payload_extra or {})},
                     run_id=run_id,
                 )
             return False
@@ -2180,8 +2188,7 @@ def _resolve_kanban_reserved_providers(task: Task) -> list[str]:
         from hermes_cli.config import load_config
         cfg = load_config() or {}
         profile = (cfg.get("kanban") or {}).get("orchestrator_profile")
-        from hermes_cli import kanban_db
-        provider = kanban_db._profile_provider_for_dispatch_guard(profile) if profile else None
+        provider = _profile_provider_for_dispatch_guard(profile) if profile else None
         if provider:
             reserved.add(provider)
     except Exception:

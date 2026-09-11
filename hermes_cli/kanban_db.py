@@ -1361,6 +1361,8 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                if task_status == "blocked":
+                    _append_event(conn, task_id, "blocked", {"source": "initial_status"})
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
@@ -1962,11 +1964,15 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     that path.
     """
     row = conn.execute(
-        "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "SELECT kind, payload FROM task_events "
+        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked', 'timed_out') "
         "ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row:
+        return False
+    if row["kind"] == "timed_out":
+        return _json_dict(_row_get(row, "payload")).get("retry_status") == "blocked"
+    return row["kind"] == "blocked"
 
 
 def _latest_event(
@@ -2898,6 +2904,23 @@ def edit_completed_task_result(
     return True
 
 
+def record_worker_diagnostic(kind: str, payload: Optional[dict] = None) -> bool:
+    """Persist a diagnostic event from inside a Kanban worker process."""
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return False
+    raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    try:
+        run_id = int(raw_run_id) if raw_run_id else None
+    except ValueError:
+        run_id = None
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing() as conn:
+        with write_txn(conn):
+            _append_event(conn, task_id, kind, payload, run_id=run_id)
+    return True
+ 
+ 
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
