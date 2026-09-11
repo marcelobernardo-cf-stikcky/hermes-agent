@@ -282,6 +282,38 @@ class TestRealProfileCdpLaunch:
         assert cdp == "http://127.0.0.1:41000"
         self._reset()
 
+    def test_headed_launch_actually_opens_a_window(self, tmp_path):
+        """browser.headed must produce a REAL window, not just skip --headless.
+
+        `--no-startup-window` lived in the unconditional flag tuple, so headed
+        mode launched a browser with no window at all: the user paid the cost
+        (measured 15 chrome processes) and saw nothing. Headed means watchable.
+        """
+        import tools.browser_tool as bt
+        self._reset()
+        proc = Mock(return_value=None, returncode=0, stdout="", stderr="")
+        captured = {}
+
+        def fake_run(argv, **kw):
+            captured["argv"] = argv
+            captured["env"] = kw["env"]
+            return proc
+
+        class FakeChrome:
+            def poll(self):
+                return None
+
+        def fake_popen(argv, **kw):
+            captured["chrome_argv"] = argv
+            (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n")
+            return FakeChrome()
+
+        with patch.object(bt_cloud, "_use_real_profile", return_value=True),              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"),              patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)),              patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/chrome"),              patch.object(bt.subprocess, "Popen", side_effect=fake_popen),              patch.object(bt_real_profile, "_agent_browser_get_cdp",
+                          side_effect=[None, "http://127.0.0.1:41000"]),              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"),              patch.object(bt.subprocess, "run", side_effect=fake_run),              patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)),              patch.object(bt_real_profile.sys, "platform", "win32"),              patch.object(bt_cloud, "_is_headed_mode", return_value=True):
+            bt_real_profile._real_profile_cdp()
+        assert "--headless=new" not in captured["chrome_argv"]
+        assert "--no-startup-window" not in captured["chrome_argv"],             "headed with --no-startup-window is a browser the user cannot see"
+
     def test_launch_is_headless_and_agent_browser_attaches(self, tmp_path):
         """Real-profile browsing runs headless (no focus-stealing window).
 
@@ -332,6 +364,8 @@ class TestRealProfileCdpLaunch:
             bt_real_profile._real_profile_cdp()
         # The chrome launch itself is headless (no window, no focus steal).
         assert "--headless=new" in captured["chrome_argv"]
+        # Headless suppresses the startup window; headed must NOT (see below).
+        assert "--no-startup-window" in captured["chrome_argv"]
         # agent-browser attaches, it does not launch.
         assert "--headless" not in captured["argv"]
         assert "--profile" not in captured["argv"]

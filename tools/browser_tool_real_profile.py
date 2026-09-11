@@ -250,7 +250,7 @@ _REAL_PROFILE_CHROME_FLAGS = (
     "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-default-apps",
     "--disable-hang-monitor", "--disable-popup-blocking", "--disable-prompt-on-repost",
-    "--disable-sync", "--disable-features=Translate", "--no-startup-window",
+    "--disable-sync", "--disable-features=Translate",
 )
 
 
@@ -300,6 +300,11 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
     _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not (_cloud._is_headed_mode() and (_has_display or not sys.platform.startswith("linux"))):
         chrome_argv.append("--headless=new")
+        # Headless has no window to suppress; headed MUST get one, or the user
+        # consented to watch and sees nothing. `--no-startup-window` used to sit
+        # in the flag tuple unconditionally, so browser.headed was a no-op here:
+        # measured 15 chrome processes and 0 visible windows.
+        chrome_argv.append("--no-startup-window")
     try:
         chrome_proc = subprocess.Popen(chrome_argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        stdin=subprocess.DEVNULL, start_new_session=True, env=_bt._build_browser_env())
