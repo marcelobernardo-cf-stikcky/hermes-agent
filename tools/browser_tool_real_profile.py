@@ -119,31 +119,32 @@ def _terminate_real_profile_chrome() -> None:
 
 
 def _bounded_attach_run(argv, *, timeout: float, env=None):
-    """Bounded `subprocess.run` for the agent-browser ATTACH call; None on timeout.
+    """Bounded run of the agent-browser ATTACH call; None on timeout.
 
-    Goes through `_bt.subprocess.run` (what tests patch) but never lets its cleanup
-    hang: on Windows, `run()`'s post-timeout path calls an UNBOUNDED `communicate()`
-    after killing only the direct child, so a surviving descendant holding duplicates
-    of the captured pipes wedges the call forever. Proven: a faulthandler stack pinned
-    this attach while `browser_exec(timeout_s=20)` ran past 40s, and reverting to a
-    plain `run()` reproduces the hang while this returns in ~8s. Running it on a
-    worker thread bounds the whole thing — the wedged drain cannot outlive our wait.
+    Output goes to FILES via ``_popen_agent_browser``, never pipes: this command is the one
+    that FORKS the daemon, the daemon inherits the captured fds, and a pipe therefore never
+    sees EOF while the daemon lives — so every capture_output run of it burns the full
+    timeout even though the attach itself finished. Measured back to back on one live Chrome:
+    piped `--cdp <port> open about:blank` timed out at 41s, the same command against the
+    already-running daemon (no fork) returned in 0.2s. ``subprocess.run`` also cannot be
+    rescued by a bigger timeout — its post-timeout cleanup calls an UNBOUNDED communicate().
     """
-    import concurrent.futures as _futures
-
-    def _call():
-        return _origin().subprocess.run(
-            argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, env=env, stdin=subprocess.DEVNULL)
-
-    pool = _futures.ThreadPoolExecutor(max_workers=1)
+    socket_dir = _session._prepare_session_socket_dir(_origin()._REAL_PROFILE_SESSION)
+    stdout_path = os.path.join(socket_dir, "_stdout_attach")
+    stderr_path = os.path.join(socket_dir, "_stderr_attach")
     try:
-        return pool.submit(_call).result(timeout=timeout + 5.0)
-    except Exception:
+        proc = _session._popen_agent_browser(list(argv), env or {}, socket_dir, "attach")
+    except OSError:
         return None
-    finally:
-        # No wait: a thread stuck in the unbounded drain must not block our return.
-        pool.shutdown(wait=False)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return None
+    stdout, stderr = _session._read_command_output_files(stdout_path, stderr_path)
+    _session._unlink_command_output_files(stdout_path, stderr_path)
+    return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
 
 
 def _cdp_http_ready(http_cdp: str) -> bool:
@@ -292,8 +293,12 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
     AGENT_BROWSER_HEADED opts into a window, except on a display-less Linux host (launch would die).
     """
     _bt = _origin()
+    # Deleted, not kept: _read_devtools_port below polls this same file for the NEW port, so a
+    # file left by a dead Chrome is returned instantly and the attach targets a dead port
+    # (measured: launch returned 51008 in 0s, nothing listening). Any still-alive Chrome on this
+    # dir was already claimed by _surviving_chrome_cdp before we get here.
     try:
-        os.unlink(os.path.join(copy_dir, "DevToolsActivePort"))  # stale port confuses reuse probes
+        os.unlink(os.path.join(copy_dir, "DevToolsActivePort"))
     except OSError:
         pass
     chrome_argv = [real_binary, f"--user-data-dir={copy_dir}", *_REAL_PROFILE_CHROME_FLAGS]
@@ -423,8 +428,13 @@ def _real_profile_cdp(deadline: Optional[float] = None) -> tuple:
         if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
             _bt._real_profile_cdp_cache["cdp"] = existing
             return existing, None
-        if existing:  # stale/wrong-dir session: close it so nothing holds the dir open
-            _agent_browser_close_session(_bt._REAL_PROFILE_SESSION, deadline=deadline)
+        # Unconditional close, not `if existing:` — the daemon caches its CDP port in its own env
+        # for its whole life, so after the Chrome it attached to dies it keeps answering (and
+        # re-attaching) with that dead port forever, which `get cdp-url` reports as
+        # "All CDP discovery methods failed for 127.0.0.1:<dead port>" and never as a usable url.
+        # A missing/failed `existing` is exactly that case, so the reusable-CDP miss must kill the
+        # daemon too, or every later launch attaches to the stale port. Costs ~0.2s with no daemon.
+        _agent_browser_close_session(_bt._REAL_PROFILE_SESSION, deadline=deadline)
         # A Chrome from an earlier hermes process can still hold the copy dir after its attach
         # daemon was reaped (that owner died). Re-attach to it rather than overlay a live profile;
         # if the daemon cannot attach, fail closed — never snapshot over an open profile. Not ours

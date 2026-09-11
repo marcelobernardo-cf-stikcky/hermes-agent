@@ -238,7 +238,8 @@ class TestRealProfileCdpLaunch:
              patch.object(bt_real_profile, "_agent_browser_get_cdp",
                           side_effect=[None, "http://127.0.0.1:41000"]), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", return_value=proc), \
+             patch.object(bt_real_profile, "_agent_browser_close_session"), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=True):
             cdp, err = bt_real_profile._real_profile_cdp()
         assert err is None
@@ -275,7 +276,8 @@ class TestRealProfileCdpLaunch:
              patch.object(bt_real_profile, "_agent_browser_get_cdp",
                           side_effect=[None, "http://127.0.0.1:41000"]), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", return_value=proc), \
+             patch.object(bt_real_profile, "_agent_browser_close_session"), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             cdp, err = bt_real_profile._real_profile_cdp()
         assert err is None
@@ -309,7 +311,7 @@ class TestRealProfileCdpLaunch:
             return FakeChrome()
 
         with patch.object(bt_cloud, "_use_real_profile", return_value=True),              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"),              patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)),              patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/chrome"),              patch.object(bt.subprocess, "Popen", side_effect=fake_popen),              patch.object(bt_real_profile, "_agent_browser_get_cdp",
-                          side_effect=[None, "http://127.0.0.1:41000"]),              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"),              patch.object(bt.subprocess, "run", side_effect=fake_run),              patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)),              patch.object(bt_real_profile.sys, "platform", "win32"),              patch.object(bt_cloud, "_is_headed_mode", return_value=True):
+                          side_effect=[None, "http://127.0.0.1:41000"]),              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"),              patch.object(bt_real_profile, "_agent_browser_close_session"),              patch.object(bt_real_profile, "_bounded_attach_run", side_effect=fake_run),              patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)),              patch.object(bt_real_profile.sys, "platform", "win32"),              patch.object(bt_cloud, "_is_headed_mode", return_value=True):
             bt_real_profile._real_profile_cdp()
         assert "--headless=new" not in captured["chrome_argv"]
         assert "--no-startup-window" not in captured["chrome_argv"],             "headed with --no-startup-window is a browser the user cannot see"
@@ -358,7 +360,8 @@ class TestRealProfileCdpLaunch:
              patch.object(bt_real_profile, "_agent_browser_get_cdp",
                           side_effect=[None, "http://127.0.0.1:41000"]), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", side_effect=fake_run), \
+             patch.object(bt_real_profile, "_agent_browser_close_session"), \
+             patch.object(bt_real_profile, "_bounded_attach_run", side_effect=fake_run), \
              patch.object(bt, "_socket_safe_tmpdir", return_value=str(tmp_path)), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             bt_real_profile._real_profile_cdp()
@@ -405,11 +408,100 @@ class TestRealProfileCdpLaunch:
              patch.object(bt_real_profile, "_agent_browser_close_session",
                           side_effect=lambda s, deadline=None: closed.__setitem__("n", closed["n"] + 1)), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", return_value=proc), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             cdp, err = bt_real_profile._real_profile_cdp()
         assert closed["n"] == 1  # stale wrong-dir session was closed
         assert cdp == "http://127.0.0.1:41000"
+        self._reset()
+
+    def test_closes_daemon_when_cdp_probe_fails(self, tmp_path):
+        """A daemon that cannot report a cdp-url is the stale-port daemon: it caches the CDP port
+        of a dead Chrome in its own env for life and re-attaches to it forever ("All CDP discovery
+        methods failed for 127.0.0.1:<dead port>"). The probe miss must still close it, or the
+        launch below attaches to that dead port instead of the Chrome it just started."""
+        import tools.browser_tool as bt
+        self._reset()
+        proc = Mock(return_value=None, returncode=0, stdout="", stderr="")
+        closed = {"n": 0}
+
+        class FakeChrome:
+            def poll(self):
+                return None
+
+        def fake_popen(argv, **kw):
+            (tmp_path / "DevToolsActivePort").write_text("41000\n/devtools/browser/x\n")
+            return FakeChrome()
+
+        with patch.object(bt_cloud, "_use_real_profile", return_value=True), \
+             patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
+             patch("hermes_cli.browser_connect.snapshot_real_profile", return_value=(str(tmp_path), None)), \
+             patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/chrome"), \
+             patch.object(bt.subprocess, "Popen", side_effect=fake_popen), \
+             patch.object(bt_real_profile, "_agent_browser_get_cdp",
+                          side_effect=[None, "http://127.0.0.1:41000"]), \
+             patch.object(bt_real_profile, "_cdp_http_ready", return_value=True), \
+             patch.object(bt_real_profile, "_surviving_chrome_cdp", return_value=None), \
+             patch.object(bt_real_profile, "_agent_browser_close_session",
+                          side_effect=lambda s, deadline=None: closed.__setitem__("n", closed["n"] + 1)), \
+             patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=proc), \
+             patch.object(bt_cloud, "_is_headed_mode", return_value=False):
+            cdp, err = bt_real_profile._real_profile_cdp()
+        assert closed["n"] == 1, "daemon with an unusable cdp-url must be closed, not left to re-attach"
+        assert cdp == "http://127.0.0.1:41000"
+        self._reset()
+
+    def test_attach_does_not_capture_pipes(self):
+        """The attach forks the daemon, which inherits the captured fds: with pipes the read never
+        sees EOF and the call burns its whole timeout (measured 41s vs 0.2s without the fork).
+        Output must go through _popen_agent_browser's files, never subprocess pipes."""
+        import tools.browser_tool as bt
+        import tools.browser_tool_session as bt_session
+        self._reset()
+        captured = {}
+
+        class FakeProc:
+            returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen_ab(argv, env, socket_dir, tag):
+            captured["argv"] = argv
+            return FakeProc()
+
+        with patch.object(bt_session, "_popen_agent_browser", side_effect=fake_popen_ab), \
+             patch.object(bt_session, "_prepare_session_socket_dir", return_value="/tmp/sd"), \
+             patch.object(bt_session, "_read_command_output_files", return_value=("ok", "")), \
+             patch.object(bt_session, "_unlink_command_output_files"), \
+             patch.object(bt.subprocess, "run", side_effect=AssertionError("attach must not use subprocess.run pipes")):
+            proc = bt_real_profile._bounded_attach_run(["agent-browser", "open"], timeout=5, env={})
+        assert proc is not None and proc.returncode == 0 and proc.stdout == "ok"
+        assert captured["argv"] == ["agent-browser", "open"]
+        self._reset()
+
+    def test_launch_ignores_stale_devtoolsactiveport(self, tmp_path):
+        """The launch must not return a port left by a DEAD Chrome: _read_devtools_port polls the
+        same file for the new port, so a stale one is returned in 0s and the attach then targets a
+        dead port (measured: returned 51008, nothing listening)."""
+        import tools.browser_tool as bt
+        self._reset()
+        port_file = tmp_path / "DevToolsActivePort"
+        port_file.write_text("51008\n/devtools/browser/dead\n")  # stale: Chrome is gone
+
+        class FakeChrome:
+            def poll(self):
+                return None
+
+        def fake_popen(argv, **kw):  # the real Chrome writes its own port a moment later
+            port_file.write_text("41000\n/devtools/browser/x\n")
+            return FakeChrome()
+
+        with patch.object(bt.subprocess, "Popen", side_effect=fake_popen), \
+             patch.object(bt_cloud, "_is_headed_mode", return_value=False):
+            port, err = bt_real_profile._launch_real_profile_chrome("/usr/bin/chrome", str(tmp_path))
+        assert (port, err) == (41000, None), "stale DevToolsActivePort leaked into the launch result"
         self._reset()
 
     @pytest.mark.parametrize("live_browser_id", ["/devtools/browser/x", "/devtools/browser/other"])
@@ -1067,7 +1159,7 @@ class TestReviewRound3:
              patch.object(bt_real_profile, "_agent_browser_get_cdp",
                           side_effect=[None, "http://127.0.0.1:9251"]), \
              patch.object(bt_install, "_find_agent_browser", return_value="/usr/bin/agent-browser"), \
-             patch.object(bt.subprocess, "run", return_value=proc), \
+             patch.object(bt_real_profile, "_bounded_attach_run", return_value=proc), \
              patch.object(bt_cloud, "_is_headed_mode", return_value=False):
             cdp, err = bt_real_profile._real_profile_cdp()
         assert err is None
