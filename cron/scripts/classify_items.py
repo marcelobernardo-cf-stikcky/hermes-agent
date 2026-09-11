@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional
 
 _ID_KEYS = ("id", "guid", "message_id", "url", "link")
 _VIEW_KEYS = ("title", "subject", "summary", "text", "body", "from", "sender", "url")
+# Classifiers drift off the requested key names; a dropped score is indistinguishable
+# from "not urgent", so accept the common synonyms instead of failing silent.
+_SCORE_KEYS = ("score", "urgency_score", "urgency", "rating")
+_REASON_KEYS = ("reason", "reasoning", "justification", "why")
 
 
 def _eprint(*args: Any) -> None:
@@ -56,13 +60,37 @@ def _item_id(item: Dict[str, Any], index: int) -> str:
 
 
 def _build_prompt(items: List[Dict[str, Any]], criteria: str) -> str:
-    lines = [f"USER IMPORTANCE CRITERIA:\n{criteria}\n", "ITEMS:"]
+    lines = [
+        "You score items for urgency against the user's criteria.",
+        f"\nUSER IMPORTANCE CRITERIA:\n{criteria}\n",
+        "ITEMS:",
+    ]
     for i, item in enumerate(items):
         # Compact view of the salient fields; the whole object when none are present.
         view = {k: item[k] for k in _VIEW_KEYS if k in item} or item
         lines.append(f"[{i}] {json.dumps(view, ensure_ascii=False)[:1200]}")
-    lines.append("\nReturn the JSON array of scores now (one object per item, same order).")
+    # The schema is stated explicitly: without it models invent key names
+    # ("urgency_score"/"reasoning"), every score is dropped at parse time, and the
+    # monitor goes permanently silent instead of failing loudly.
+    lines.append(
+        "\nReturn ONLY a JSON array, one object per item, same order, exactly these keys:\n"
+        '[{"index": <int, 0-based>, "score": <int 0-10>, "reason": "<short justification>"}]\n'
+        "No prose, no markdown fences."
+    )
     return "\n".join(lines)
+
+
+def _as_score(value: Any) -> Optional[int]:
+    """Coerce a classifier's score to int; None when it isn't a usable number."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
 
 
 def _parse_scores(content: str, n_items: int) -> Dict[int, Dict[str, Any]]:
@@ -88,13 +116,17 @@ def _parse_scores(content: str, n_items: int) -> Dict[int, Dict[str, Any]]:
             return {}
     if not isinstance(arr, list):
         return {}
-    return {
-        obj["index"]: obj
-        for obj in arr
-        if isinstance(obj, dict)
-        and isinstance(obj.get("index"), int)
-        and 0 <= obj["index"] < n_items
-    }
+    out: Dict[int, Dict[str, Any]] = {}
+    for obj in arr:
+        if not isinstance(obj, dict):
+            continue
+        index = obj.get("index")
+        if not isinstance(index, int) or not (0 <= index < n_items):
+            continue
+        score = _as_score(next((obj[k] for k in _SCORE_KEYS if k in obj), None))
+        reason = next((obj[k] for k in _REASON_KEYS if k in obj), "")
+        out[index] = {"index": index, "score": score, "reason": reason}
+    return out
 
 
 def _render_text(surfaced: list) -> str:
@@ -144,6 +176,11 @@ def main() -> int:
         return 4
 
     scores = _parse_scores(content, len(items))
+    if not scores:
+        # Every score unparseable is a broken classifier, not a quiet interval: exiting 0 here
+        # would hide urgent items behind an empty stdout forever.
+        _eprint("classify_items: no usable scores parsed from classifier output")
+        return 5
     surfaced = []
     for i, item in enumerate(items):
         s = scores.get(i)
