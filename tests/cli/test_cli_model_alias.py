@@ -42,8 +42,11 @@ def test_dash_m_alias_resolves_model_and_provider(cli_mod, sonnet_alias):
 
 def test_explicit_provider_wins_over_alias(cli_mod, sonnet_alias):
     shell = cli_mod.HermesCLI(model="sonnet", provider="xai-oauth", compact=True, max_turns=1)
-    assert shell.model == "sonnet"  # caller pinned the provider; do not rewrite
+    # Native contract (model_switch.resolve_startup_model_route): an explicit
+    # --provider wins over the alias LABEL; the alias still contributes model
+    # + base_url. So the model IS resolved, only the provider is preserved.
     assert shell.requested_provider == "xai-oauth"
+    assert shell.model == "claude-sonnet-5"
 
 
 def test_non_alias_model_untouched(cli_mod, sonnet_alias):
