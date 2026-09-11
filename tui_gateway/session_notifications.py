@@ -5,9 +5,49 @@ desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals
 from __future__ import annotations
 
 import contextlib
+import logging
+import threading
+import time
+from pathlib import Path
 
 from gateway.kanban_watchers_notifier import TERMINAL_KINDS as _KANBAN_NOTIFY_KINDS
 from .method_ctx import bind_module
+
+
+# One profile-local lookup serves every session poller; without this, N idle sessions
+# each reopened SQLite + active_sessions.lock on every 0.5s queue timeout.
+_BOT_LIVE_OWNER_CACHE_TTL_S = 1.0
+_BOT_LIVE_OWNER_ERROR_TTL_S = 5.0
+_bot_live_owner_cache: dict[str, tuple[float, dict | None]] = {}
+_bot_live_owner_cache_lock = threading.Lock()
+_bot_live_owner_last_error_log: dict[str, float] = {}
+
+
+def bot_live_owner_snapshot(profile_home) -> dict | None:
+    """Share the short-lived owner snapshot across per-session notification pollers."""
+    from tools.bot_live_delivery import find_canonical_live_owner
+
+    key = str(Path(profile_home).resolve())
+    now = time.monotonic()
+    with _bot_live_owner_cache_lock:
+        cached = _bot_live_owner_cache.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        try:
+            owner = find_canonical_live_owner(profile_home)
+        except Exception:
+            expiry = now + _BOT_LIVE_OWNER_ERROR_TTL_S
+            _bot_live_owner_cache[key] = (expiry, None)
+            if now - _bot_live_owner_last_error_log.get(key, 0.0) >= _BOT_LIVE_OWNER_ERROR_TTL_S:
+                _bot_live_owner_last_error_log[key] = now
+                logging.getLogger(__name__).warning(
+                    "Bot live-owner lookup failed; retrying in %.1fs",
+                    _BOT_LIVE_OWNER_ERROR_TTL_S,
+                    exc_info=True,
+                )
+            return None
+        _bot_live_owner_cache[key] = (now + _BOT_LIVE_OWNER_CACHE_TTL_S, owner)
+        return owner
 
 
 def _notif_locked_sessions(fn, default):
@@ -501,7 +541,7 @@ def _notif_handle_ready(sid, session, events, emitted, registry, fmt, deferred, 
 
 def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
     """Run one durable envelope only after local FIFO/continuations yield the idle boundary."""
-    from tools.bot_live_delivery import claim_pending_delivery, complete_delivery, find_canonical_live_owner
+    from tools.bot_live_delivery import claim_pending_delivery, complete_delivery
 
     home = _session_home(session)
     with session["history_lock"]:
@@ -512,7 +552,7 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         lease = session.get("active_session_lease")
         if lease is None or getattr(lease, "released", False):
             return False
-        owner = find_canonical_live_owner(home)
+        owner = bot_live_owner_snapshot(home)
         if (not owner or owner.get("lease_id") != lease.lease_id
                 or owner.get("live_session_id") != sid
                 or owner.get("session_id") != session.get("session_key")):

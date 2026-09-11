@@ -73,6 +73,7 @@ def test_local_work_blocks_mailbox_claim_without_consuming_envelope(monkeypatch,
         "_session_home": lambda session: tmp_path,
         "_run_prompt_submit": submit,
         "_notif_release_turn": lambda session: session.update(running=False),
+        "bot_live_owner_snapshot": session_notifications.bot_live_owner_snapshot,
     })
     session = {"history_lock": threading.RLock(), "agent": object(), "session_key": "chat",
                "active_session_lease": SimpleNamespace(lease_id="lease", released=False)}
@@ -87,3 +88,30 @@ def test_local_work_blocks_mailbox_claim_without_consuming_envelope(monkeypatch,
     assert submitted == ["imported"] and not pending
     assert receipts[0][0][1] == "receipt"
     assert receipts[0][1]["reply"] == "reply"
+
+
+def test_live_owner_snapshot_deduplicates_pollers(monkeypatch, tmp_path):
+    import tools.bot_live_delivery as mailbox
+
+    owner = {"profile_home": str(tmp_path), "session_id": "chat", "lease_id": "lease", "live_session_id": "live"}
+    calls = []
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: calls.append(home) or owner)
+    session_notifications._bot_live_owner_cache.clear()
+    assert session_notifications.bot_live_owner_snapshot(tmp_path) == owner
+    assert session_notifications.bot_live_owner_snapshot(tmp_path) == owner
+    assert calls == [tmp_path]
+
+
+def test_live_owner_snapshot_backs_off_lookup_errors(monkeypatch, tmp_path):
+    import tools.bot_live_delivery as mailbox
+
+    calls = []
+    def fail(home):
+        calls.append(home)
+        raise RuntimeError("lock unavailable")
+
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", fail)
+    session_notifications._bot_live_owner_cache.clear()
+    assert session_notifications.bot_live_owner_snapshot(tmp_path) is None
+    assert session_notifications.bot_live_owner_snapshot(tmp_path) is None
+    assert calls == [tmp_path]
