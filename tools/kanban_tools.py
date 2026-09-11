@@ -155,6 +155,66 @@ def _worker_run_id(task_id: str) -> Optional[int]:
         return None
 
 
+def _reject_self_approved_review(kb, conn, task_id: str) -> Optional[str]:
+    """Refuse ``kanban_complete`` when THIS worker's run was claimed FROM
+    ``review`` and the ``review_requested`` event it is closing out never
+    named a reviewer distinct from the implementer.
+
+    Guards ONLY this agent-facing tool — deliberately NOT
+    ``hermes_cli.kanban_db.complete_task`` itself, which is also the
+    human/dashboard approval path for a run-less ``review`` task (#54823)
+    and the legitimate reopen/reclaim path where no reviewer was ever set
+    (see ``test_reopening_parent_retracts_review_and_blocks_approval``); a
+    guard placed at that layer caught both cases and broke the second one.
+    A run claimed FROM ``review`` inherits ``source_status=review`` on its
+    ``claimed`` event (see ``kb.claim_review_task``); when that is true and
+    the ``review_requested`` event has no distinct reviewer, an agent must
+    not self-approve via this tool — this is exactly the reviewer=None gap
+    that let a wake-resumed run complete its own review with zero elapsed
+    time (run #160, #t_ae5576ac).
+
+    Returns ``None`` when not applicable, else a diagnostic string.
+    """
+    run_id = _worker_run_id(task_id)
+    if run_id is None:
+        return None
+    claimed_events = [
+        e for e in kb.list_events(conn, task_id)
+        if e.kind == "claimed" and e.run_id == run_id
+    ]
+    if not claimed_events:
+        return None
+    claimed_payload = claimed_events[-1].payload
+    if not isinstance(claimed_payload, dict) or claimed_payload.get("source_status") != "review":
+        return None  # ordinary implementer completion, not a review claim.
+    review_events = [
+        e for e in kb.list_events(conn, task_id) if e.kind == "review_requested"
+    ]
+    if not review_events:
+        return None
+    payload = review_events[-1].payload
+    if not isinstance(payload, dict):
+        payload = {}
+    implementer = payload.get("implementer")
+    reviewer = payload.get("reviewer")
+    if (
+        not isinstance(reviewer, str)
+        or not reviewer.strip()
+        or (isinstance(implementer, str) and reviewer.strip() == implementer.strip())
+    ):
+        return (
+            "this run was claimed from review with no reviewer distinct "
+            "from the implementer on record (reviewer=None or "
+            "reviewer==implementer); an agent cannot self-approve via "
+            "kanban_complete — request a human/dashboard approval, or "
+            "call kanban_request_changes and re-request review with an "
+            "explicit reviewer"
+        )
+    return None
+
+
+
+
 def _stamp_worker_session_metadata(task_id: str, metadata: Optional[dict]) -> Optional[dict]:
     """Add trusted worker session id metadata for this worker's own task."""
     session_id = _own_task_env(task_id, "HERMES_SESSION_ID")
@@ -493,12 +553,24 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 # --- Handlers ---
 
+# Own-card ids already served in full to this worker process (one-shot process,
+# so a module-level set spans the whole lifetime).
+_OWN_CARD_READ: set = set()
+
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
+        if os.environ.get("HERMES_KANBAN_TASK") == tid and tid in _OWN_CARD_READ:
+            runs = kb.list_runs(conn, tid)
+            return json.dumps({
+                "task": {k: v for k, v in _fields(task, _TASK_FIELDS).items() if k != "body"},
+                "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)[-3:]],
+                "latest_run": _fields(runs[-1], _RUN_FIELDS) if runs else None,
+                "view": "worker view: body and handoffs were in your first kanban_show; only the last 3 comments and latest run are shown."})
+        _OWN_CARD_READ.add(tid)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
@@ -563,6 +635,9 @@ def _handle_complete(args: dict, **kw) -> str:
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
+        self_approval = _reject_self_approved_review(kb, conn, tid)
+        if self_approval:
+            return tool_error(self_approval)
         task = kb.get_task(conn, tid)
         if _goal_gate("kanban_complete", task, tid, (summary or result or "").strip()):
             metadata = {**(metadata or {}), "judge_unavailable": True}
