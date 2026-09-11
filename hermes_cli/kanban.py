@@ -832,21 +832,23 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
         verdict, reason, _, _, transport_failed = judge_goal(goal=f"{task.title}\n\n{task.body or ''}".strip(),
                                               last_response=evidence.strip())
         if transport_failed:
-            verdict, reason = "done", ""
+            verdict, reason = "judge_unavailable", ""
     except Exception as judge_exc:
         import logging as _logging
 
         _logging.getLogger(__name__).warning("goal judge check failed, allowing lifecycle handoff: %s",
                                              judge_exc, exc_info=True)
-    return (verdict, None if verdict == "done" else reason)
+    return (verdict, None if verdict in ("done", "judge_unavailable") else reason)
 
 
 def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: str,
-                     continue_hint: str) -> Optional[str]:
+                     continue_hint: str, unavailable: Optional[list] = None) -> Optional[str]:
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
     verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence)
+    if verdict == "judge_unavailable" and unavailable is not None:
+        unavailable.append(True)
     if verdict == "blocked":
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
@@ -873,15 +875,17 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            _unavail: list = []
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
-                "Provide evidence matching the task's acceptance criteria.")
+                "Provide evidence matching the tasks acceptance criteria.", _unavail)
             if gate_err:
                 fail_msg[tid] = gate_err
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
-            return kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
+            return kb.complete_task(conn, tid, result=args.result, summary=summary,
+                                    metadata=({**(metadata or {}), "judge_unavailable": True} if _unavail else metadata),
                                     expected_run_id=_worker_run_id_for(tid))
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
@@ -961,12 +965,15 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
     if rc:
         return rc
     with kbc.connect_closing() as conn:
+        _unavail: list = []
         gate_err = _goal_gate_error(
             conn, tid, summary or "", "review handoff",
             "Record the block with kanban block instead of requesting review.",
-            "Provide acceptance evidence matching the task.")
+            "Provide acceptance evidence matching the task.", _unavail)
         if gate_err:
             return _err(gate_err)
+        if _unavail:
+            metadata = {**(metadata or {}), "judge_unavailable": True}
         ok, reason = kb.request_review(
             conn, tid, summary=summary, metadata=metadata, reviewer=getattr(args, "reviewer", None),
             expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)), with_reason=True)
