@@ -97,6 +97,10 @@ class DispatchResult:
     skipped_unassigned: list[str] = field(default_factory=list)
     """Ready task ids with no assignee at all — operator-actionable (usually a
     misfiled task waiting for routing)."""
+    skipped_unknown_skill: list[tuple[str, list[str]]] = field(default_factory=list)
+    """``(task_id, missing_skills)`` for ready cards whose assignee profile lacks a
+    requested skill. Deferred, not failed: no run, no failure counter — installing
+    the skill lets the next tick spawn it (3032ea7c24)."""
     auto_assigned_default: list[str] = field(default_factory=list)
     """Unassigned task ids that had ``kanban.default_assignee`` applied this
     tick before spawning, so telemetry/CLI/dashboard can show the dispatcher
@@ -1539,6 +1543,20 @@ def _dispatch_lane_task(
     if profile_exists is not None and not profile_exists(assignee):
         result.skipped_nonspawnable.append(task_id)
         return False
+    # Requested skill absent from the assignee PROFILE: defer, never fail. A run
+    # would burn a spawn and a failure slot on a card that only needs the skill
+    # installed; the next tick picks it up once it is (3032ea7c24). Covers both
+    # lanes because ready and review both funnel through here.
+    try:
+        _requested = _kb.json.loads(row["skills"]) if _kb._row_get(row, "skills") else []
+    except (TypeError, ValueError):
+        _requested = []
+    if lane == "review":
+        _requested = [*(_requested if isinstance(_requested, list) else []), "sdlc-review"]
+    _missing = _kb._unknown_profile_skills(assignee, _requested if isinstance(_requested, list) else [])
+    if _missing:
+        result.skipped_unknown_skill.append((task_id, _missing))
+        return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
     if per_profile_cap is not None:
@@ -1735,7 +1753,7 @@ def _tick_spawn_budget(
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, skills FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()

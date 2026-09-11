@@ -1280,6 +1280,13 @@ def create_task(
     )
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
+    unknown_skills = _unknown_profile_skills(assignee, skills_list)
+    if unknown_skills:
+        quoted = ", ".join(repr(name) for name in unknown_skills)
+        raise ValueError(
+            f"skill(s) {quoted} are not available in assignee profile "
+            f"{assignee!r}; install them in that profile before creating the task"
+        )
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
     # race may insert twice, the next lookup stabilises on the newest.
@@ -1951,6 +1958,55 @@ def _synthesize_ended_run(
 
 
 # --- Dependency resolution (todo -> ready) ---
+def _unknown_profile_skills(
+    assignee: Optional[str],
+    skills: Optional[Iterable[str]],
+) -> Optional[list[str]]:
+    """Return explicitly requested skills missing from an assignee profile.
+
+    ``None`` means that *assignee* is not a Hermes profile and therefore cannot
+    be preflighted here (control-plane lanes are claimed by their own worker).
+    A list, including an empty list, means a real profile was checked.  Skill
+    resolution runs under a context-local ``HERMES_HOME`` override, so a
+    dispatcher serving the orchestrator profile never accidentally resolves or
+    copies its skills for the worker profile.
+    """
+    if not assignee or not skills:
+        return []
+
+    from hermes_cli.profiles import get_profile_dir, profile_exists
+
+    profile_dir = get_profile_dir(assignee)
+    # A non-existent named assignee is an external/control-plane lane. Keep
+    # accepting it for manual claim; the dispatcher already has a separate
+    # nonspawnable bucket for that case. Do not treat the orchestrator's
+    # profile as a fallback source of skills.
+    if not profile_exists(assignee) or not profile_dir.is_dir():
+        return None
+
+    names = [str(name).strip() for name in skills if str(name).strip()]
+    if not names:
+        return []
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(profile_dir)
+    try:
+        from tools.skills_tool import skill_view
+
+        missing: list[str] = []
+        for name in names:
+            try:
+                payload = json.loads(skill_view(name, preprocess=False))
+            except Exception:
+                payload = {"success": False}
+            if not isinstance(payload, dict) or payload.get("success") is not True:
+                missing.append(name)
+        return missing
+    finally:
+        reset_hermes_home_override(token)
+
+
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """True when the newest ``blocked``/``unblocked`` event is ``blocked`` — an
