@@ -12,6 +12,7 @@ from acp.schema import (
     AudioContentBlock, BlobResourceContents, EmbeddedResourceContentBlock, ImageContentBlock,
     ResourceContentBlock, TextContentBlock, TextResourceContents,
 )
+from hermes_constants import is_wsl, windows_path_to_wsl
 
 logger = logging.getLogger("acp_adapter.server")
 
@@ -91,7 +92,10 @@ def _path_from_file_uri(uri: str) -> Path | None:
         drive, rest = path_text[0], path_text[2:]
     else:
         return Path(path_text)
-    return Path("/mnt") / drive.lower() / rest.lstrip("/\\").replace("\\", "/")
+    native_path = f"{drive}:" + rest.replace("\\", "/")
+    if is_wsl():
+        return Path(windows_path_to_wsl(native_path) or native_path)
+    return Path(native_path)
 
 
 def _decode_text_bytes(data: bytes, mime_type: str | None) -> str | None:
@@ -100,7 +104,7 @@ def _decode_text_bytes(data: bytes, mime_type: str | None) -> str | None:
         return None
     for encoding in ("utf-8-sig", "utf-8", "latin-1"):
         try:
-            return data.decode(encoding)
+            return data.decode(encoding).replace("\r\n", "\n")
         except UnicodeDecodeError:
             continue
     # Binary (ELF/Mach-O/PE), not a shell script: feeding its decoded bytes back into the guard tokenizes
