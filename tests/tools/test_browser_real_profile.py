@@ -143,6 +143,10 @@ class TestSnapshotRealProfile:
         copy2 preserves Chrome's 0644 source modes and sqlite-backup files
         land umask-wide, so without explicit reconciliation the user's
         session-cookie copies are group/world-readable.
+
+        POSIX-only: Windows has no group/world mode bits — os.chmod(0o600)
+        there leaves st_mode 0o666, so the assertion cannot hold. Access
+        control on Windows is the ACL the snapshot dir inherits.
         """
         import stat
 
