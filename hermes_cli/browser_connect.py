@@ -201,8 +201,35 @@ def real_profile_data_dir(browser: str, system: str | None = None) -> str | None
     return next((c for c in candidates if os.path.isdir(c)), candidates[0])
 
 
+def is_real_browser_binary(path: str | None) -> bool:
+    """False for missing files, 0-byte files, and Windows App Execution Aliases.
+
+    ``WindowsApps\\chrome.exe`` is a Store stub: launching it opens
+    "Install Chrome from the Microsoft Store" instead of Chrome.
+    """
+    if not path or not os.path.isfile(path):
+        return False
+    parts = os.path.normcase(os.path.normpath(path)).split(os.sep)
+    if "windowsapps" in parts:
+        return False
+    try:
+        return os.path.getsize(path) != 0
+    except OSError:
+        return True  # isfile already passed; size unreadable (mocked path)
+
+
 def _first_present(paths) -> str | None:
-    return next((p for p in paths if p and os.path.isfile(p)), None)
+    return next((p for p in paths if p and is_real_browser_binary(p)), None)
+
+
+def first_installed_chromium(system: str | None = None) -> str | None:
+    """First Chromium-family product with a real binary (Chrome, then Chromium, Brave, Edge).
+
+    Used when the OS default is Opera/Firefox/etc. so real-profile browsing still
+    launches Google Chrome rather than failing closed into a packaged/Store stub.
+    """
+    system = system or platform.system()
+    return next((b.key for b in _BROWSERS if chromium_executable(b.key, system)), None)
 
 
 def chromium_executable(browser: str, system: str | None = None) -> str | None:
@@ -431,6 +458,39 @@ def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
 
 
 _SNAPSHOT_DONE_MARKER = ".hermes-snapshot-complete"
+
+
+def _close_copy_dir_browser(copy_dir: str) -> int:
+    """Terminate browser processes holding Hermes' own snapshot ``copy_dir``; count killed.
+
+    NOT the consented path: ``copy_dir`` is Hermes-created scratch (recreated on the next
+    launch), never the user's profile, so there is no human state to lose. Best-effort —
+    a failure here just leaves the caller's existing locked-DB error to fire.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    gone = (psutil.NoSuchProcess, psutil.AccessDenied)
+    targets: list = []
+    for p in _processes_holding_profile(copy_dir):
+        targets.append(p)
+        with contextlib.suppress(*gone):
+            targets.extend(p.children(recursive=True))
+    if not targets:
+        return 0
+    for p in targets:
+        with contextlib.suppress(*gone):
+            p.terminate()
+    alive = psutil.wait_procs(targets, timeout=5.0)[1]
+    for p in alive:
+        with contextlib.suppress(*gone):
+            p.kill()
+    psutil.wait_procs(alive, timeout=3.0)
+    logger.debug("real-profile: closed %d process(es) holding the copy dir", len(targets))
+    return len(targets)
+
+
 # Prefix stamped on the "profile is locked" error so the calling layer can recognize the
 # needs-the-browser-closed condition and surface the close-with-approval flow.
 _PROFILE_LOCKED_PREFIX = "[profile-locked] "
@@ -657,6 +717,14 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         _sync_local_state(src, dst, source_profile)
         if not populated:
             _copy_profile_tree(src, dst, source_profile)
+        # Reap any browser still holding the COPY dir before overwriting its auth DBs.
+        # `_terminate_real_profile_chrome` only knows procs THIS process launched, so a
+        # copy-dir Chrome orphaned by an earlier hermes run survives it — and then
+        # `backup()` contends with it (it retries forever on SQLITE_BUSY: the class
+        # behind the 420s `browser_exec` hangs). Discovering owners by data-dir is the
+        # only way to catch orphans. Scoped to `dst`, which is Hermes' own snapshot
+        # copy, so the user's real browser is never touched.
+        _close_copy_dir_browser(dst)
         # Both paths: lock-aware auth DB copy into Default — also the per-launch re-sync.
         failed_dbs = _mirror_profile_auth(src, dst, source_profile)
         if failed_dbs:  # even online-backup failed: never launch a silently signed-out session
@@ -696,10 +764,12 @@ def _debug_candidate_paths(system: str):
         if system == "Darwin":
             yield b.mac_app
         elif system == "Windows":
-            yield from map(shutil.which, b.win_bins)
+            # Install paths BEFORE PATH: shutil.which("chrome.exe") often hits the
+            # 0-byte WindowsApps Store alias first.
             for base in filter(None, install_bases):
                 for parts in b.win_install:
                     yield os.path.join(base, *parts)
+            yield from map(shutil.which, b.win_bins)
         else:
             yield from map(shutil.which, b.linux_bins)
             yield from b.linux_paths
@@ -716,7 +786,7 @@ def get_chrome_debug_candidates(system: str) -> list[str]:
     candidates: dict[str, str] = {}  # normalized -> first path seen (dedupe, keep order)
     for path in filter(None, _debug_candidate_paths(system)):
         normalized = os.path.normcase(os.path.normpath(path))
-        if normalized not in candidates and os.path.isfile(path):
+        if normalized not in candidates and is_real_browser_binary(path):
             candidates[normalized] = path
     return list(candidates.values())
 
