@@ -90,13 +90,28 @@ def reap_orphaned_real_profile_chrome() -> int:
             record_path.unlink(missing_ok=True)
             continue
         owner_pid, pid = record.get("owner_pid"), record.get("pid")
+        # A live owner keeps its Chrome on purpose (it is reused across calls), so liveness
+        # still protects it -- but only while it is actually being used. An abandoned one is
+        # pure cost: measured on this box, a headless Chrome on a WebGL page burns 3.67% of
+        # 16 cores forever, in a tab nobody can see, and they accumulate per session.
+        # Idleness is judged by last_used_at, which _touch_real_profile_chrome refreshes on
+        # every launch and every reattach; the next call relaunches in ~1s.
+        idle = time.time() - (record.get("last_used_at") or record.get("started_at") or 0)
         if owner_pid == os.getpid():
             # Ours: skip while THIS pid is still tracked in memory. A global "any chrome alive"
             # check would spare a leaked pid just because a sibling launch is live.
             if any(p.pid == pid and p.poll() is None for p in _bt._real_profile_chrome_procs):
-                continue
+                if idle <= IDLE_REAP_S:
+                    continue
         elif owner_pid and _pid_exists(int(owner_pid)):
-            continue  # another live Hermes owns it
+            if idle <= IDLE_REAP_S:
+                continue  # another live Hermes owns it, and is still using it
+        # Last gate before any kill: a RECENTLY USED Chrome is never reaped, whatever the
+        # owner bookkeeping says. Without this a live Chrome missing from the in-memory list
+        # (a reattached one, or one launched by another code path) was killed mid-use --
+        # caught by the behavioural check, invisible to code inspection.
+        if idle <= IDLE_REAP_S and owner_pid and _pid_exists(int(owner_pid)):
+            continue
         if pid and _is_real_profile_chrome(int(pid), record.get("copy_dir"), record.get("start_time")):
             try:
                 _tree_kill(int(pid), record.get("start_time"))
@@ -259,6 +274,17 @@ def _read_devtools_port(data_dir: str) -> Optional[str]:
         return None
 
 
+def _touch_real_profile_chrome(copy_dir: str) -> None:
+    """Mark this Chrome as used NOW, so the idle reaper only sees genuinely abandoned ones."""
+    try:
+        rec = _chrome_state_dir() / f"{os.path.basename(copy_dir)}-{os.getpid()}.json"
+        data = json.loads(rec.read_text(encoding="utf-8"))
+        data["last_used_at"] = time.time()
+        rec.write_text(json.dumps(data), encoding="utf-8")
+    except Exception as e:
+        _origin().logger.debug("could not touch real-profile chrome record: %s", e)
+
+
 def _surviving_chrome_cdp(data_dir: str) -> Optional[str]:
     """HTTP CDP root of a Chrome still running on ``data_dir``, or None. ``DevToolsActivePort``
     outlives a crashed Chrome and its port can be recycled by another local CDP server, so the
@@ -276,7 +302,10 @@ def _surviving_chrome_cdp(data_dir: str) -> Optional[str]:
         ws_url = str(requests.get(f"{http_cdp}/json/version", timeout=2).json().get("webSocketDebuggerUrl") or "")
     except Exception:
         return None
-    return http_cdp if ws_url.endswith(browser_path) else None
+    if not ws_url.endswith(browser_path):
+        return None
+    _touch_real_profile_chrome(data_dir)
+    return http_cdp
 
 
 def _cdp_on_data_dir(http_cdp: str, data_dir: str) -> bool:
@@ -290,6 +319,8 @@ def _agent_browser_close_session(session_name: str, deadline: Optional[float] = 
     """Best-effort close of an agent-browser session (stale/wrong-dir cleanup)."""
     _agent_browser_session_cmd(session_name, "close", log_label="session close", deadline=deadline)
 
+
+IDLE_REAP_S = 180.0  # sem chamada por 3 min: o Chrome ocioso nao paga o seu custo de CPU
 
 _REAL_PROFILE_CHROME_FLAGS = (
     "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
@@ -361,6 +392,7 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
         return None, f"{_RP}the launch failed: {e}"
     _bt._real_profile_chrome_procs.append(chrome_proc)
     _record_real_profile_chrome(chrome_proc, copy_dir)
+    _touch_real_profile_chrome(copy_dir)
 
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
