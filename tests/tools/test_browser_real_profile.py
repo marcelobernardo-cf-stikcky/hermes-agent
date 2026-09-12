@@ -117,8 +117,14 @@ class TestSnapshotRealProfile:
         (root / "Default" / "Cache" / "Cache_Data" / "big").write_text("x" * 1000)
         (root / "Code Cache" / "js" / "blob").write_text("y" * 1000)
         (root / "Crashpad" / "dump").write_text("z")
-        # Live-instance leftovers that must never reach the copy
-        os.symlink("dead-target-1", root / "SingletonLock")
+        # Live-instance leftovers that must never reach the copy. Chrome writes
+        # SingletonLock as a DANGLING symlink on POSIX and a plain file on Windows;
+        # both must be excluded, and os.symlink needs admin/Developer Mode on Windows.
+        lock = root / "SingletonLock"
+        try:
+            os.symlink("dead-target-1", lock)
+        except (OSError, NotImplementedError):
+            lock.write_text("dead-target-1")
         return root
 
     def test_fresh_snapshot_copies_auth_and_skips_caches(self, tmp_path, monkeypatch):
@@ -167,12 +173,17 @@ class TestSnapshotRealProfile:
         assert dst is None
         assert err and "was not found" in err
 
+    @pytest.mark.linux_only
     def test_snapshot_files_are_owner_only(self, tmp_path, monkeypatch):
         """Every copied file must be 0600 and every dir 0700 (#96729).
 
         copy2 preserves Chrome's 0644 source modes and sqlite-backup files
         land umask-wide, so without explicit reconciliation the user's
         session-cookie copies are group/world-readable.
+
+        POSIX-only: Windows has no group/world mode bits — os.chmod(0o600)
+        there leaves st_mode 0o666, so the assertion cannot hold. Access
+        control on Windows is the ACL the snapshot dir inherits.
         """
         import stat
 
@@ -198,8 +209,13 @@ class TestSnapshotRealProfile:
                     offenders.append((os.path.join(root, f), oct(mode)))
         assert not offenders, f"group/world-accessible snapshot entries: {offenders}"
 
+    @pytest.mark.linux_only
     def test_existing_lax_snapshot_heals_on_refresh(self, tmp_path, monkeypatch):
-        """A snapshot left 0644 by an older build tightens on the next pass."""
+        """A snapshot left 0644 by an older build tightens on the next pass.
+
+        POSIX-only for the same reason as the sibling test: os.chmod cannot
+        clear group/world bits on Windows.
+        """
         import stat
 
         import hermes_cli.browser_connect as bc

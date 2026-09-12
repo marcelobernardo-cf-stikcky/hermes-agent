@@ -220,9 +220,13 @@ class TestChromeDebugLaunch:
         assert command.startswith(f'"{chrome}" --remote-debugging-port=9222')
         assert "'" not in command
 
-    def test_windows_store_alias_is_skipped(self, tmp_path):
+    def test_windows_store_alias_is_skipped(self, tmp_path, monkeypatch):
         stub = str(tmp_path / "WindowsApps" / "chrome.exe")
         real = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        # The install-path branch reads ProgramFiles from the environment, and the
+        # hermetic runner (`env -i`) does not forward it — without this the real
+        # binary is never even yielded and the assertion below is vacuous.
+        monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
 
         def fake_isfile(path):
             return path in {stub, real}
