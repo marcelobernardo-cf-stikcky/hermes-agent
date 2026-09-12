@@ -345,6 +345,16 @@ def _request_agent_overrides(
     return overrides
 
 
+def _request_relay_metadata(body: Any) -> Dict[str, Any]:
+    """Extract Relay metadata from an OpenAI request body."""
+    if not isinstance(body, dict):
+        return {}
+    metadata = body.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    return dict(metadata)
+
+
 def _is_compressed_summary_message(message: Any) -> bool:
     """Recognize every compaction carrier shape via the compressor's own classifier
     (SessionDB drops the in-process marker; a prefix scan misses merge-into-tail carriers)."""
@@ -616,6 +626,17 @@ def _session_chat_user_message(body: Dict[str, Any], *, param: str = "message") 
         return _normalize_multimodal_content(user_message), None
     except ValueError as exc:
         return None, _multimodal_validation_error(exc, param=param)
+
+
+def _request_turn_author(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalized body ``author``, None when absent or null, ValueError when not an object. It only labels memory."""
+    raw = body.get("author")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("author must be an object")
+    from agent.turn_author import parse_turn_author
+    return parse_turn_author(raw)
 
 
 _USAGE_TOKEN_KEYS = ("input_tokens", "output_tokens", "total_tokens")
@@ -1378,16 +1399,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if adapter is not None:
             return adapter
         runner = self.gateway_runner or request.app.get("gateway_runner")
-        adapters = getattr(runner, "adapters", None)
-        if not adapters:
+        if runner is None:
             return None
+        # ``/p/<profile>/`` binds the callback to that profile's adapter map; a missing adapter there is a
+        # 503, never the primary profile's adapter (verifying/dispatching a secondary's events under the
+        # default bot's credentials, #84266). ``_authorization_adapter`` is the shared fail-closed resolver.
         try:
-            return adapters.get(Platform(platform_name))
+            platform = Platform(platform_name)
         except Exception:
-            for platform, candidate in adapters.items():
-                if getattr(platform, "value", platform) == platform_name:
-                    return candidate
-        return None
+            return None
+        return runner._authorization_adapter(platform, _api_request_profile.get())
 
     async def _handle_platform_event_callback(self, request: "web.Request") -> "web.Response":
         platform_name = self._normalize_callback_platform(request.match_info.get("platform", ""))
@@ -2619,7 +2640,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         category), the same set ``/skills list`` shows."""
         try:
             from tools.skills_tool import _find_all_skills, _sort_skills
-            skills = _sort_skills(_find_all_skills(skip_disabled=False))
+            skills = _sort_skills(
+                _find_all_skills(
+                    skip_disabled=False, include_editorial=True
+                )
+            )
         except Exception:
             logger.exception("GET /v1/skills failed")
             return _error_response("Failed to enumerate skills", 500, err_type="server_error")
@@ -2875,8 +2900,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     db.set_session_title, session_id, "" if body["title"] is None else str(body["title"]))
             except ValueError as exc:
                 return _error_response(str(exc), 400, code="invalid_title")
-        for flag, setter in (("pinned", db.set_session_pinned), ("archived", db.set_session_archived),
-                             ("hidden", db.set_session_hidden)):
+        # Pinned last: set_session_pinned clears hidden, so a pin in the same request
+        # wins over an explicit hidden (same order as the dashboard's _RENAME_FLAG_SETTERS).
+        for flag, setter in (("archived", db.set_session_archived), ("hidden", db.set_session_hidden),
+                             ("pinned", db.set_session_pinned)):
             if flag in body:
                 await asyncio.to_thread(setter, session_id, body[flag])
         if "unread" in body:
@@ -2986,6 +3013,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         user_message, err = _session_chat_user_message(body)
         if err is not None:
             return None, err
+        try:
+            turn_author = _request_turn_author(body)
+        except ValueError as exc:
+            return None, _error_response(str(exc), 400, code="invalid_author")
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return None, _error_response("system_message must be a string", 400, code="invalid_system_message")
@@ -3024,7 +3055,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             gateway_session_key=gateway_session_key, route=route, session_model=session_model,
             requested_runtime=runtime_request.get("requested") or {},
             route_source=runtime_request.get("route_source") or "global",
-            confirmed_runtime_lock=lock_active, **agent_overrides)
+            confirmed_runtime_lock=lock_active, turn_author=turn_author,
+            # #98619: the client addresses this session by construction — the id is in the
+            # request path (/api/sessions/{session_id}/chat) — so a wake self-post lands where
+            # the client will read it. The audited native-session opt-in.
+            session_history_delivery="1", **agent_overrides)
         return {
             "gateway_session_key": gateway_session_key, "session_id": session_id, "body": body,
             "user_message": user_message, "runtime_request": runtime_request,
@@ -3535,12 +3570,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @staticmethod
     def _bind_api_server_session(
-        *, chat_id: str = "", session_key: str = "", session_id: str = "",
-        browser_control_principal: str = "", browser_control_transport_family: str = "") -> list:
-        """Bind session contextvars for an API-server agent run — the SINGLE chokepoint for every
-        agent-entry path. Hardwires ``platform="api_server"`` + ``async_delivery=False`` (HTTP
-        can never wake the agent after the turn) so no route reintroduces the silent no-op bug.
-        Returns reset tokens for ``clear_session_vars`` in a ``finally`` (request-scoped).
+        *, chat_id: str = "", session_key: str = "", session_id: str = "", profile: str = "",
+        browser_control_principal: str = "", browser_control_transport_family: str = "",
+        session_history_delivery: str = "") -> list:
+        """Bind an API turn with push disabled and history delivery default-denied.
 
         This is the SINGLE structural chokepoint every API-server agent-entry
         path must use to seed session context — it hardwires
@@ -3548,420 +3581,22 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         physically cannot reintroduce the silent-no-op bug (#10760) by
         forgetting to mark the channel as non-delivering.
 
-        ``wake_delivery`` stays True: unlike push, the api_server can resume
-        via ``gateway/wake.py`` self-post.
+        Wake authority now rides on ``session_history_delivery`` (upstream
+        default-deny, #98619): unlike push, the api_server can resume via
+        ``gateway/wake.py`` self-post when the route declares it.
 
         Returns reset tokens; pass them to ``clear_session_vars`` in a
         ``finally`` block.
-        """
+
+        Only routes whose continuation reads SessionDB may pass "1". An omitted
+        declaration or fingerprint-derived identity keeps delegation synchronous.
+
+        ``profile`` is the ``/p/<profile>/`` prefix serving the request (``""`` = default). It must
+        reach ``HERMES_SESSION_PROFILE``: the persistent-Docker container key is derived from it, so an
+        unbound profile collapses every profile's turns onto the default sandbox (#96370)."""
         from gateway.session_context import set_session_vars
         return set_session_vars(
             platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
-            browser_control_principal=browser_control_principal,
+            profile=profile, browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
-            async_delivery=False,
-            wake_delivery=True,
-            cron_session="")
-
-    def _turn_runtime_metadata(
-        self, agent: Any, *, route: Optional[Dict[str, Any]], requested_runtime: Optional[Dict[str, Any]],
-        route_source: str, confirmed_runtime_lock: bool) -> Dict[str, Any]:
-        """Sanitized actual-vs-requested runtime for a finished turn; raises RuntimeError when a
-        confirmed model lock's provider/model differs from what the agent actually ran with."""
-        runtime = dict(getattr(agent, "_hermes_api_runtime", {}) or {})
-        raw_provider = getattr(agent, "provider", "")
-        raw_model = getattr(agent, "model", "")
-        actual_provider = self._clean_runtime_id(raw_provider, max_len=80) if isinstance(raw_provider, str) else ""
-        actual_model = self._clean_runtime_id(raw_model) if isinstance(raw_model, str) else ""
-        for key, actual in (("provider", actual_provider), ("model", actual_model)):
-            if actual:
-                runtime[key] = actual
-            else:
-                runtime.setdefault(key, "")
-        route = route or {}
-        requested_runtime = requested_runtime or {}
-        if confirmed_runtime_lock:
-            expected_provider = self._clean_runtime_id(
-                route.get("provider") or requested_runtime.get("provider"), max_len=80)
-            expected_model = self._clean_runtime_id(route.get("model") or requested_runtime.get("model"))
-            if (expected_provider and actual_provider != expected_provider) or (
-                expected_model and actual_model != expected_model):
-                raise RuntimeError(
-                    "confirmed model lock runtime mismatch: "
-                    f"expected provider={expected_provider or '<unspecified>'} "
-                    f"model={expected_model or '<unspecified>'}; "
-                    f"actual provider={actual_provider or '<unknown>'} "
-                    f"model={actual_model or '<unknown>'}")
-        if requested_runtime:
-            model, provider = self._requested_ids(requested_runtime)
-            runtime["requested"] = {"provider": provider, "model": model}
-        runtime["route_source"] = route_source or runtime.get("route_source") or "global"
-        return self._sanitize_runtime_metadata(
-            runtime=runtime, requested_runtime=requested_runtime or None, route_source=route_source or "global",
-            model_lock=("confirmed" if confirmed_runtime_lock else ""))
-
-    def _finish_turn_result(
-        self, agent: Any, result: Any, session_id: Optional[str], *, route, requested_runtime, route_source,
-        confirmed_runtime_lock: bool) -> tuple:
-        """Attach usage, effective session id, ``_compressed`` and runtime metadata to a finished turn."""
-        usage = {"input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                 "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                 "total_tokens": getattr(agent, "session_total_tokens", 0) or 0}
-        _eff_sid = getattr(agent, "session_id", session_id)
-        if isinstance(_eff_sid, str) and _eff_sid:
-            result["session_id"] = _eff_sid
-        _session_rotated = isinstance(_eff_sid, str) and isinstance(session_id, str) and _eff_sid != session_id
-        if getattr(agent, "_last_compaction_in_place", False) or _session_rotated:
-            result["_compressed"] = True
-        if requested_runtime or route or confirmed_runtime_lock or (route_source and route_source != "global"):
-            runtime = self._turn_runtime_metadata(
-                agent, route=route, requested_runtime=requested_runtime,
-                route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
-            if isinstance(result, dict):
-                result["runtime"] = runtime
-            usage["runtime"] = runtime
-        return result, usage
-
-    async def _run_agent(
-        self, user_message: str, conversation_history: List[Dict[str, str]],
-        ephemeral_system_prompt: Optional[str] = None, session_id: Optional[str] = None,
-        stream_delta_callback=None, tool_progress_callback=None, tool_start_callback=None,
-        tool_complete_callback=None, agent_ref: Optional[list] = None, active_run_id: Optional[str] = None,
-        gateway_session_key: Optional[str] = None, requested_model: Optional[str] = None,
-        requested_provider: Optional[str] = None, model_options: Optional[Dict[str, Any]] = None,
-        route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
-        requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
-        confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False) -> tuple:
-        """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
-        ``agent_ref[0]`` receives the agent so SSE writers can interrupt it; ``active_run_id``
-        registers it in ``_active_run_agents``. Under a confirmed model lock the actual
-        provider/model must match or the turn fails; ``runtime`` metadata is attached."""
-        loop = asyncio.get_running_loop()
-        # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
-        request_profile = _api_request_profile.get()
-        request_browser_control_principal = _api_request_browser_control_principal.get()
-        request_browser_control_transport_family = _api_request_browser_control_transport_family.get()
-
-        def _run():
-            from gateway.session_context import clear_session_vars
-            with self._profile_scope(request_profile):
-                tokens = self._bind_api_server_session(
-                    chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
-                    session_id=session_id or "",
-                    browser_control_principal=request_browser_control_principal,
-                    browser_control_transport_family=request_browser_control_transport_family)
-                agent = None
-                try:
-                    agent = self._create_agent(
-                        ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
-                        stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
-                        tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
-                        gateway_session_key=gateway_session_key, requested_model=requested_model,
-                        requested_provider=requested_provider, model_options=model_options, route=route,
-                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
-                    if agent_ref is not None:
-                        agent_ref[0] = agent
-                    if active_run_id:
-                        self._active_run_agents[active_run_id] = agent
-                    effective_task_id = session_id or str(uuid.uuid4())
-                    # Process baseline for disconnect reaping (this surface bypasses TurnRunner)
-                    # + shutdown-interrupt registration, once for every caller.
-                    # Baseline for selective background-process reaping on SSE client disconnect — mirrors
-                    # gateway/run.py's gateway-turn cleanup (#76115); this API-server surface runs its own
-                    # agent lifecycle and doesn't go through TurnRunner, so it needs its own baseline.
-                    # /v1/runs runs its own agent lifecycle (no TurnRunner, no _run_agent) — record turn
-                    # process ownership so stop/cancel can reap only the background processes this run
-                    # created (#76115).
-                    _publish_turn_process_ownership(agent, effective_task_id)
-                    # Registering here, once, covers every _run_agent() caller — the same reason the
-                    # _ProviderAuthResolutionError handler below lives here rather than in each route. Only
-                    # two callers pass ``agent_ref``, and only /v1/runs has a run_id, so neither is a usable
-                    # hook for the rest. See #63529.
-                    self._shutdown_interruptible_agents[id(agent)] = agent
-                    result = agent.run_conversation(
-                        user_message=user_message, conversation_history=conversation_history,
-                        task_id=effective_task_id)
-                    return self._finish_turn_result(
-                        agent, result, session_id, route=route, requested_runtime=requested_runtime,
-                        route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
-                except _ProviderAuthResolutionError as exc:
-                    # Typed provider-auth failure only, handled once for every caller in
-                    # run.py's response shape (text, no HTTP error).
-                    logger.warning("Provider authentication failed for session=%s: %s",
-                                   session_id or "", exc)
-                    return (
-                        {"final_response": f"⚠️ Provider authentication failed: {exc}", "messages": [],
-                         "api_calls": 0, "tools": []},
-                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                finally:
-                    # Turn over (any outcome): clear ownership so a late disconnect can't reap
-                    # background work this turn deliberately left running.
-                    if active_run_id:
-                        self._active_run_agents.pop(active_run_id, None)
-                    if agent is not None:
-                        _clear_turn_process_ownership(agent)
-                        self._shutdown_interruptible_agents.pop(id(agent), None)
-                        # Bind the declared key to the row the turn actually ended on
-                        # (agent.session_id carries a mid-turn rotation). Opt-in per route.
-                        # Record the declared conversation on the row the turn actually ended on —
-                        # ``agent.session_id`` already carries a mid-turn compression rotation (#16938), so
-                        # the next reply resolves the live transcript rather than its retired parent.
-                        # Opt-in: only the routes that resolve their session id from the declared key
-                        # (/v1/responses, /v1/runs) record one, so no other caller's rows change shape.
-                        if bind_declared_conversation:
-                            self._bind_declared_conversation(
-                                getattr(agent, "session_id", None) or session_id, gateway_session_key)
-                    clear_session_vars(tokens)
-        self._activate_admitted_request()
-        self._inflight_agent_runs += 1
-        try:
-            return await loop.run_in_executor(None, _run)
-        finally:
-            self._inflight_agent_runs -= 1
-
-    # -- /v1/runs, room grants, room dispatch: thin delegators (real methods: tests assert
-    # __dict__ membership and patch the module-level implementations) ---------------------
-
-    _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
-    _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
-
-    def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
-        return _api_runs._set_run_status(self, run_id, status, **fields)
-
-    def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
-        return _api_runs._make_run_event_callback(self, run_id, loop, _api_server=sys.modules[__name__])
-
-    def _run_idempotency_scope(self, request: "web.Request") -> str:
-        return _api_runs._run_idempotency_scope(self, request, _api_server=sys.modules[__name__])
-
-    @staticmethod
-    def _room_grant_token(request: "web.Request") -> str:
-        return _room_grants._room_grant_token(request)
-
-    def _room_grant_secret(self) -> bytes:
-        return _room_grants._room_grant_secret(self)
-
-    def _room_grant_claims(self, request: "web.Request", *, permission: str) -> dict[str, Any]:
-        return _room_grants._room_grant_claims(self, request, permission=permission)
-
-    def _check_run_auth(self, request: "web.Request", *, permission: str) -> "web.Response | None":
-        return _api_runs._check_run_auth(self, request, permission=permission, _api_server=sys.modules[__name__])
-
-    async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
-        return await _room_dispatch._ensure_hosted_member_session(self, dispatch)
-
-    async def _normalize_room_dispatch(self, request: "web.Request", body: Any) -> tuple[Any, "web.Response | None"]:
-        return await _room_dispatch._normalize_room_dispatch(self, request, body, _api_server=sys.modules[__name__])
-
-    _handle_room_member_invitation = _room_grant_delegate("_handle_room_member_invitation")
-    _handle_room_member_capabilities = _room_grant_delegate("_handle_room_member_capabilities")
-    _handle_room_member_grant_refresh = _room_grant_delegate("_handle_room_member_grant_refresh")
-    _handle_room_member_grant_revoke = _room_grant_delegate("_handle_room_member_grant_revoke")
-
-    def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
-        return _api_runs._durable_run_status(self, request, run_id)
-
-    @_admit_api_agent_request
-    async def _handle_runs(self, request: "web.Request") -> "web.Response":
-        return await _api_runs._handle_runs(self, request, _api_server=sys.modules[__name__])
-
-    def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
-        return _api_runs._request_owns_run(self, request, run_id)
-
-    def _release_run_owner_if_forgotten(self, run_id: str) -> None:
-        _api_runs._release_run_owner_if_forgotten(self, run_id)
-
-    _handle_get_run = _run_route_delegate("_handle_get_run")
-    _handle_run_events = _run_route_delegate("_handle_run_events")
-    _handle_run_approval = _run_route_delegate("_handle_run_approval")
-    _handle_steer_run = _run_route_delegate("_handle_steer_run")
-    _handle_stop_run = _run_route_delegate("_handle_stop_run")
-
-    async def _sweep_orphaned_runs(self) -> None:
-        return await _api_runs._sweep_orphaned_runs(self)
-
-    def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
-        return _api_runs._sweep_orphaned_runs_once(self, now)
-
-    # -- BasePlatformAdapter interface ------------------------------------------------
-
-    def _api_key_passes_startup_guard(self) -> bool:
-        """Return True when API_SERVER_KEY is present and strong enough to start."""
-        if not self._api_key:
-            logger.error(
-                "[%s] Refusing to start: API_SERVER_KEY is required for the API server, "
-                "including loopback-only binds on %s.",
-                self.name, self._host)
-            return False
-        try:
-            from hermes_cli.auth import has_usable_secret
-        except Exception as exc:
-            # Fail CLOSED: "could not check" must not mean "start" on a terminal-capable endpoint.
-            logger.error(
-                "[%s] Refusing to start: API_SERVER_KEY strength could not be "
-                "verified (%s: %s), and this endpoint dispatches "
-                "terminal-capable agent work. Repair the installation before "
-                "starting the API server on %s.",
-                self.name, type(exc).__name__, exc, self._host)
-            return False
-        if not has_usable_secret(self._api_key, min_length=16):
-            logger.error(
-                "[%s] Refusing to start: API_SERVER_KEY is a "
-                "placeholder or too short (<16 chars). This endpoint "
-                "dispatches terminal-capable agent work — a guessable "
-                "key is remote code execution. Generate a strong secret "
-                "(e.g. `openssl rand -hex 32`) and set API_SERVER_KEY "
-                "before starting the API server on %s.",
-                self.name, self._host)
-            return False
-        return True
-
-    async def connect(self, *, is_reconnect: bool = False) -> bool:
-        """Start the aiohttp web server."""
-        if not AIOHTTP_AVAILABLE:
-            logger.warning("[%s] aiohttp not installed", self.name)
-            return False
-        with self._session_db_cache_lock:
-            self._session_db_cache_closed = False
-        if not self._api_key_passes_startup_guard():
-            # Config error, not transient: a bare ``return False`` would make the reconnect watcher
-            # re-instantiate the adapter (+ sqlite connection) until EMFILE.
-            self._set_fatal_error(
-                # A rejected API_SERVER_KEY is a configuration error, not a transient blip — the key will
-                # not become valid on its own. A bare ``return False`` makes the reconnect watcher in
-                # gateway.run treat it as retryable and loop forever at the backoff cap, re-instantiating
-                # the adapter (and its ResponseStore sqlite connection) every retry (#38803: ~501 leaked
-                # connections / 1002 fds over 2.5 days until EMFILE took the whole gateway down).
-                # Non-retryable drops it from the reconnect queue — same treatment as the port-conflict
-                # guard (api_server_port_in_use). The guard already logged the specific rejection reason
-                # just above.
-                "api_server_key_invalid",
-                "API_SERVER_KEY was rejected by the startup guard (missing, "
-                "placeholder/too short, or strength unverifiable — see the "
-                "error logged above). Generate a strong secret (e.g. "
-                "`openssl rand -hex 32`), set API_SERVER_KEY, then "
-                "`/platform resume api_server`.",
-                retryable=False)
-            return False
-        try:
-            mws = [mw for mw in (
-                self._make_profile_prefix_middleware(), cors_middleware, body_limit_middleware,
-                security_headers_middleware) if mw is not None]
-            self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
-            assert self._app is not None
-            # Native routes + multiplex /p/<profile>/ mirrors (the prefix middleware validates and
-            # scopes config/credentials when multiplexing is on).
-            for method, path, handler in self._http_route_table():
-                self._app.router.add_route(method, path, handler)
-                self._app.router.add_route(method, f"/p/{{profile}}{path}", handler)
-            # After native routes: Relay bootstrap shims feature-detect on this key and must
-            # no-op rather than shadow the native session-control handlers.
-            self._app["api_server_adapter"] = self
-            if self.gateway_runner is not None:
-                self._app["gateway_runner"] = self.gateway_runner
-            self._track_background_task(asyncio.create_task(self._sweep_orphaned_runs()))
-            # Network-accessible + unsandboxed local terminal backend = host-user RCE surface;
-            # warn, don't refuse (the operator may have a firewall / strong key).
-            if is_network_accessible(self._host):
-                _backend = "local"
-                with suppress(Exception):
-                    from hermes_cli.config import load_config as _load_cfg
-                    _backend = ((_load_cfg() or {}).get("terminal") or {}).get("backend", "local")
-                if str(_backend).lower() == "local":
-                    logger.warning(
-                        "[%s] API server is network-accessible (%s) AND the "
-                        "terminal backend is 'local' (unsandboxed). Agent work "
-                        "dispatched through this endpoint runs as the host user "
-                        "with full terminal/file access. Strongly consider a "
-                        "sandboxed backend (terminal.backend: docker) and "
-                        "firewalling this port to trusted networks only.",
-                        self.name, self._host)
-
-            # Plugin-registered native handlers, wired before AppRunner.setup() freezes the router.
-            self._wire_plugin_handlers(self._app)
-            self._runner = web.AppRunner(self._app)
-            await self._runner.setup()
-            # Bind directly (a pre-probe raced the bind, misreporting TIME_WAIT as "in use").
-            # SO_REUSEADDR off on macOS (BSD can split traffic between two listeners).
-            # Bind directly instead of probing 127.0.0.1 first — the old single-family pre-probe raced the
-            # real bind and reported a TIME_WAIT socket as "in use" (#10297), failing gateway restarts for
-            # up to ~60s. SO_REUSEADDR is platform-dependent (same rationale as the webhook adapter,
-            # #65482): - macOS (BSD semantics): two sockets with SO_REUSEADDR can silently split traffic
-            # while both report success — disable. - Linux: SO_REUSEADDR only permits rebinding past
-            # TIME_WAIT (a second live listener needs SO_REUSEPORT, never set), so keep the default
-            # (enabled) for instant restart rebinds.
-            self._site = web.TCPSite(
-                self._runner, self._host, self._port, reuse_address=False if sys.platform == "darwin" else None)
-            try:
-                await self._site.start()
-            except OSError as exc:
-                await self._runner.cleanup()
-                self._runner = None
-                self._site = None
-                if getattr(exc, "errno", None) == errno.EADDRINUSE:
-                    # Config error: non-retryable, or the reconnect watcher leaks fds forever.
-                    self._set_fatal_error(
-                        # A port conflict is a configuration error, not a transient blip — another process
-                        # holds the port for its lifetime. A bare ``return False`` makes the reconnect
-                        # watcher in gateway.run treat it as retryable and loop forever at the backoff cap
-                        # (observed: 1568+ retries over 5 days across multi-profile setups all defaulting to
-                        # the same port, #52132), filling errors.log and leaking the adapter's ResponseStore
-                        # fds each retry. Non-retryable drops it from the reconnect queue; the operator
-                        # recovers with ``/platform resume api_server`` after changing the port.
-                        "api_server_port_in_use",
-                        f"Port {self._port} already in use. Set "
-                        f"platforms.api_server.port in config.yaml to a "
-                        f"different value, then `/platform resume api_server`.",
-                        retryable=False)
-                logger.error(
-                    "[%s] Could not bind %s:%d: %s. Set a different port in "
-                    "config.yaml: platforms.api_server.port",
-                    self.name, self._host, self._port, exc)
-                return False
-            self._mark_connected()
-            logger.info(
-                "[%s] API server listening on http://%s:%d (model: %s)",
-                self.name, self._host, self._port, self._model_name)
-            return True
-        except Exception as e:
-            logger.error("[%s] Failed to start API server: %s", self.name, e)
-            return False
-
-    async def disconnect(self) -> None:
-        """Stop the aiohttp server and release every owned resource, including the ResponseStore
-        connection (the reconnect loop builds a fresh adapter per retry; leaked fds hit EMFILE).
-
-        Without this, every adapter instance leaks 2 file descriptors (the database file and its WAL
-        sidecar) — the reconnect loop in ``gateway.run`` constructs a fresh adapter on every retry, so 2
-        fds/retry × 300s backoff cap ≈ 12 fds/hour, which exhausts the default 2560 fd limit after ~12h of
-        failed reconnects and turns the whole gateway into a zombie (OSError: [Errno 24] Too many open
-        files, #37011).
-        """
-        self._mark_disconnected()
-        if self._response_store is not None:
-            try:
-                self._response_store.close()
-            except Exception:
-                logger.debug("Failed to close response store for %s", self.name, exc_info=True)
-        _api_runs._close_run_state(self)
-        try:
-            if self._site:
-                await self._site.stop()
-                self._site = None
-            if self._runner:
-                await self._runner.cleanup()
-                self._runner = None
-        finally:
-            self._close_cached_session_dbs()
-            self._app = None
-        logger.info("[%s] API server stopped", self.name)
-
-    async def send(
-        self, chat_id: str, content: str, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Not used — the HTTP request/response cycle handles delivery directly."""
-        return SendResult(success=False, error="API server uses HTTP request/response, not send()")
-
-    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Return basic info about the API server."""
-        return {"name": "API Server", "type": "api", "host": self._host, "port": self._port}
+            async_delivery=False, cron_session="", session_history_delivery=session_history_delivery)

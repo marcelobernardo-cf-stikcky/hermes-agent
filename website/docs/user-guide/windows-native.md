@@ -166,7 +166,7 @@ On legacy `cmd.exe` consoles `Ctrl+Enter` collapses to plain `Enter` — use `Es
 
 ## Running the gateway at Windows login
 
-`hermes gateway install` on Windows prefers **Scheduled Tasks** and falls back to a Startup-folder launcher when task creation is blocked. Both paths use a hidden WScript supervisor; the fallback does not require administrator rights.
+`hermes gateway install` on Windows uses **Scheduled Tasks** with a Startup-folder fallback — no admin required.
 
 ### Install
 
@@ -176,11 +176,11 @@ hermes gateway install
 
 What happens under the hood:
 
-1. Attempts `schtasks /Create /SC ONLOGON /RL LIMITED /TN Hermes_Gateway` — registers a task that runs at your login with standard (non-elevated) permissions. If this account's task ACL requires UAC, Hermes reports that and continues with the fallback when elevation is not approved.
-2. If schtasks is blocked by policy or elevation is unavailable, writes a hidden VBS launcher into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`. The VBS supervisor waits for the gateway child and relaunches it after abnormal exits, with a short backoff; clean shutdown and fatal configuration exit stop the loop.
-3. The child is spawned with the console `python.exe` under a hidden window (`CREATE_NO_WINDOW`), not `pythonw.exe`, so descendants inherit one hidden console instead of flashing new consoles.
+1. `schtasks /Create /SC ONLOGON /RL LIMITED /TN Hermes_Gateway` — registers a task that runs at your login with standard (non-elevated) permissions. No UAC prompt.
+2. If schtasks is blocked by group policy, falls back to writing a small `Hermes_Gateway.vbs` launcher (run hidden via `wscript.exe`) into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`. Same effect, slightly cruder. A VBScript is used rather than a `cmd.exe` shortcut because a console allocated at logon can receive a close event that kills the gateway before it finishes starting.
+3. Spawns the gateway **detached via `pythonw.exe`** — not `python.exe`. `pythonw.exe` has no console attached, which immunizes it against `CTRL_C_EVENT` broadcasts from sibling processes (a real issue that used to kill the gateway when you Ctrl+C'd anything in the same process group).
 
-Flags used when spawning: `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`.
+Flags used when spawning: `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB`.
 
 ### Manage
 
@@ -297,7 +297,7 @@ You hit a shebang-script invocation that bypassed the `.cmd` shim. Hermes resolv
 Your download of `install.ps1` picked up a UTF-8 BOM. The `irm | iex` form strips BOMs automatically; `[scriptblock]::Create((irm ...))` does not. Re-run with the simple `irm | iex` form, or download the script manually and save it without a BOM via `[IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))`.
 
 **Gateway won't stay running after restart.**
-Check `hermes gateway status` — it merges the schtasks entry, the Startup-folder shortcut (if used), and the live PID. If schtasks is registered but not running, group policy may be blocking `ONLOGON` triggers. Run `schtasks /Query /TN HermesGateway /V /FO LIST` to see the task's failure reason, or fall back to the Startup-folder path by uninstalling and reinstalling with `HERMES_GATEWAY_FORCE_STARTUP=1`.
+Check `hermes gateway status` — it merges the schtasks entry, the Startup-folder shortcut (if used), and the live PID. If schtasks is registered but not running, group policy may be blocking `ONLOGON` triggers. Run `schtasks /Query /TN Hermes_Gateway /V /FO LIST` (`Hermes_Gateway_<profile>` for a named profile) to see the task's failure reason. The Startup-folder fallback engages automatically only when `schtasks` itself fails to register the task; there is no environment variable or flag to force it.
 
 **`/edit` still does nothing after setting `$env:EDITOR`.**
 You set it in the current process only; close and reopen the shell, or set it at User scope in System Properties → Environment Variables. Verify with `echo $env:EDITOR` in a new PowerShell window.

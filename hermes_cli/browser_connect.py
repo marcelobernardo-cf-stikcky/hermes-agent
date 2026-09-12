@@ -201,35 +201,8 @@ def real_profile_data_dir(browser: str, system: str | None = None) -> str | None
     return next((c for c in candidates if os.path.isdir(c)), candidates[0])
 
 
-def is_real_browser_binary(path: str | None) -> bool:
-    """False for missing files, 0-byte files, and Windows App Execution Aliases.
-
-    ``WindowsApps\\chrome.exe`` is a Store stub: launching it opens
-    "Install Chrome from the Microsoft Store" instead of Chrome.
-    """
-    if not path or not os.path.isfile(path):
-        return False
-    parts = os.path.normcase(os.path.normpath(path)).split(os.sep)
-    if "windowsapps" in parts:
-        return False
-    try:
-        return os.path.getsize(path) != 0
-    except OSError:
-        return True  # isfile already passed; size unreadable (mocked path)
-
-
 def _first_present(paths) -> str | None:
-    return next((p for p in paths if p and is_real_browser_binary(p)), None)
-
-
-def first_installed_chromium(system: str | None = None) -> str | None:
-    """First Chromium-family product with a real binary (Chrome, then Chromium, Brave, Edge).
-
-    Used when the OS default is Opera/Firefox/etc. so real-profile browsing still
-    launches Google Chrome rather than failing closed into a packaged/Store stub.
-    """
-    system = system or platform.system()
-    return next((b.key for b in _BROWSERS if chromium_executable(b.key, system)), None)
+    return next((p for p in paths if p and os.path.isfile(p)), None)
 
 
 def chromium_executable(browser: str, system: str | None = None) -> str | None:
@@ -419,75 +392,29 @@ def _secure_snapshot(path: str, *, contents: bool = False) -> None:
 _SQLITE_AUTH_DBS = frozenset({"Cookies", "Login Data", "Login Data For Account", "Web Data"})
 
 
-# `Connection.backup()` RETRIES FOREVER on SQLITE_BUSY: CPython loops
-# `sqlite3_backup_step` + `sqlite3_sleep` while the result is OK/BUSY/LOCKED, and
-# no argument bounds that loop — `sqlite3.connect(timeout=)` covers only the
-# initial lock negotiation. So a contended DESTINATION hangs the snapshot with no
-# way out except the `progress` callback, which runs once per step: raising from
-# it is the ONLY place a deadline can land. This is the class behind the 420s
-# `browser_exec` incidents (faulthandler pinned `_copy_auth_file` while
-# `timeout_s=20`). Measured: the same source DB copies in 0.00s to a FRESH
-# destination and hangs indefinitely against the live copy dir.
-_BACKUP_PAGES_PER_STEP = 256
-# Per-file, and deliberately small: `_mirror_profile_auth` copies 4 SQLite DBs, so
-# this is spent up to 4x per snapshot. The `shutil.copy2` fallback right below
-# handles a contended DB in ~0.00s (measured), so waiting longer buys nothing —
-# it only delays a path that already works.
-_BACKUP_BUDGET_S = 2.5
-# Busy timeout for the DESTINATION handle. `_profile_is_locked` probes the SOURCE
-# before the snapshot, but nothing bounded the destination: when an automation
-# Chrome is still live on the copy dir it holds those DBs, and `backup()` blocks
-# acquiring the destination write lock BEFORE its first step — so the `progress`
-# callback never runs and no source-side guard can fire. Measured with 5 live
-# Chrome PIDs on the copy dir: `begin immediate` on the destination blocked on
-# Network/Cookies and Web Data, while every SOURCE db copied in <=0.02s.
-# Bounding this handle turns a multi-minute hang into a fast, fail-closed error.
-_DST_LOCK_TIMEOUT_S = 2.0
-
-
-def _backup_deadline_guard(budget_s: float = _BACKUP_BUDGET_S):
-    """`progress` callback for `Connection.backup` that aborts past *budget_s*.
-
-    Raising inside the callback propagates out of `backup()`, so the caller's
-    existing `except Exception` falls through to the plain-copy path instead of
-    hanging. A copy that cannot finish in the budget is a contended DB, and the
-    raw copy (or a missing single auth file) is the right answer there.
-    """
-    deadline = time.monotonic() + budget_s
-
-    def _progress(status: int, remaining: int, total: int) -> None:
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"sqlite backup exceeded {budget_s:.0f}s ({remaining}/{total} pages left)")
-
-    return _progress
-
-
 def _copy_auth_file(src_file: str, dst_file: str) -> bool:
-    """Copy one auth file, lock-aware; True on success. SQLite DBs use the online-backup API (works
-    under a Windows write lock), falling through to a raw copy; failure only if BOTH fail."""
+    """Copy auth state; refuse a DB that cannot be snapshotted consistently within five seconds."""
     os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-    if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
-        # With a live Chrome on macOS, mode=ro WITHOUT immutable=1 can hang connect/backup
-        # forever (blocked inside lock negotiation, so the busy-timeout never fires).
-        # immutable=1 reads instantly and is correct: we want a committed snapshot, not
-        # coordinated writes. A torn read raises → next mode, then the plain-copy fallback.
-        for uri in (f"file:{src_file}?mode=ro&immutable=1", f"file:{src_file}?mode=ro"):
-            try:
-                # Short busy timeout so a truly wedged DB fails fast rather than hanging.
-                with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=5)) as source:
-                    with contextlib.closing(
-                            sqlite3.connect(dst_file, timeout=_DST_LOCK_TIMEOUT_S)) as out, out:
-                        source.backup(out, pages=_BACKUP_PAGES_PER_STEP,
-                                      progress=_backup_deadline_guard())
-                return True
-            except Exception as e:
-                logger.debug("real-profile: sqlite-backup of %s failed (%s); trying next mode",
-                             src_file, e)
     try:
-        shutil.copy2(src_file, dst_file)
+        if os.path.basename(src_file) in _SQLITE_AUTH_DBS:
+            deadline = time.monotonic() + 5.0
+
+            def check_deadline(_status: int, _remaining: int, _total: int) -> None:
+                if _status != sqlite3.SQLITE_DONE and time.monotonic() >= deadline:
+                    raise TimeoutError("auth database backup exceeded five seconds")
+
+            # SQLite must coordinate both ends: immutable ignores committed source WAL,
+            # while replacing only the destination file can replay its abandoned WAL.
+            # Connection busy timeouts do not bound backup's retry loop; its callback does.
+            with contextlib.closing(sqlite3.connect(
+                    Path(src_file).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.0)) as source:
+                with contextlib.closing(sqlite3.connect(dst_file, timeout=0.0)) as out:
+                    source.backup(out, pages=256, progress=check_deadline, sleep=0.1)
+        else:
+            shutil.copy2(src_file, dst_file)
         return True
-    except OSError as e:
+    except (OSError, sqlite3.Error) as e:
+        # A raw DB copy can lose committed WAL or overwrite a locked destination.
         logger.debug("real-profile: could not copy %s: %s", src_file, e)
         return False
 
@@ -504,37 +431,6 @@ def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
 
 
 _SNAPSHOT_DONE_MARKER = ".hermes-snapshot-complete"
-
-
-def _close_copy_dir_browser(copy_dir: str) -> int:
-    """Terminate browser processes holding Hermes' own snapshot ``copy_dir``; count killed.
-
-    NOT the consented path: ``copy_dir`` is Hermes-created scratch (recreated on the next
-    launch), never the user's profile, so there is no human state to lose. Best-effort —
-    a failure here just leaves the caller's existing locked-DB error to fire.
-    """
-    try:
-        import psutil
-    except ImportError:
-        return 0
-    gone = (psutil.NoSuchProcess, psutil.AccessDenied)
-    targets: list = []
-    for p in _processes_holding_profile(copy_dir):
-        targets.append(p)
-        with contextlib.suppress(*gone):
-            targets.extend(p.children(recursive=True))
-    if not targets:
-        return 0
-    for p in targets:
-        with contextlib.suppress(*gone):
-            p.terminate()
-    alive = psutil.wait_procs(targets, timeout=5.0)[1]
-    for p in alive:
-        with contextlib.suppress(*gone):
-            p.kill()
-    psutil.wait_procs(alive, timeout=3.0)
-    logger.debug("real-profile: closed %d process(es) holding the copy dir", len(targets))
-    return len(targets)
 # Prefix stamped on the "profile is locked" error so the calling layer can recognize the
 # needs-the-browser-closed condition and surface the close-with-approval flow.
 _PROFILE_LOCKED_PREFIX = "[profile-locked] "
@@ -761,19 +657,11 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         _sync_local_state(src, dst, source_profile)
         if not populated:
             _copy_profile_tree(src, dst, source_profile)
-        # Reap any browser still holding the COPY dir before overwriting its auth DBs.
-        # `_terminate_real_profile_chrome` only knows procs THIS process launched, so a
-        # copy-dir Chrome orphaned by an earlier hermes run survives it — and then
-        # `backup()` contends with it (it retries forever on SQLITE_BUSY: the class
-        # behind the 420s `browser_exec` hangs). Discovering owners by data-dir is the
-        # only way to catch orphans. Scoped to `dst`, which is Hermes' own snapshot
-        # copy, so the user's real browser is never touched.
-        _close_copy_dir_browser(dst)
         # Both paths: lock-aware auth DB copy into Default — also the per-launch re-sync.
         failed_dbs = _mirror_profile_auth(src, dst, source_profile)
         if failed_dbs:  # even online-backup failed: never launch a silently signed-out session
             return None, (f"could not read the '{browser}' profile's login data ({failed_dbs} "
-                          f"database(s) locked). Close {browser} and retry, or turn "
+                          f"database(s) unavailable). Close {browser} and retry, or turn "
                           "browser.use_real_profile off.")
         # Never carry live-instance leftovers into the copy.
         for leftover in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
@@ -808,12 +696,10 @@ def _debug_candidate_paths(system: str):
         if system == "Darwin":
             yield b.mac_app
         elif system == "Windows":
-            # Install paths BEFORE PATH: shutil.which("chrome.exe") often hits the
-            # 0-byte WindowsApps Store alias first.
+            yield from map(shutil.which, b.win_bins)
             for base in filter(None, install_bases):
                 for parts in b.win_install:
                     yield os.path.join(base, *parts)
-            yield from map(shutil.which, b.win_bins)
         else:
             yield from map(shutil.which, b.linux_bins)
             yield from b.linux_paths
@@ -830,7 +716,7 @@ def get_chrome_debug_candidates(system: str) -> list[str]:
     candidates: dict[str, str] = {}  # normalized -> first path seen (dedupe, keep order)
     for path in filter(None, _debug_candidate_paths(system)):
         normalized = os.path.normcase(os.path.normpath(path))
-        if normalized not in candidates and is_real_browser_binary(path):
+        if normalized not in candidates and os.path.isfile(path):
             candidates[normalized] = path
     return list(candidates.values())
 
