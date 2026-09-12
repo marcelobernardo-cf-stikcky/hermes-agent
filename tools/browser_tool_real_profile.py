@@ -9,6 +9,7 @@ through ``_bt`` (resolved per call — never import ``tools.browser_tool`` at im
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -197,6 +198,49 @@ def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str,
     if result is None:
         _bt.logger.debug("real-profile %s failed or timed out after %.1fs", log_label, timeout)
     return result
+
+
+
+def _tcp_reachable(host: str, port: int, timeout: float = 0.4) -> bool:
+    """True when ``host:port`` accepts a TCP connection."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _agent_browser_daemon_alive(session_name: str) -> bool:
+    """True when an agent-browser daemon for ``session_name`` is already running.
+
+    Every agent-browser CLI invocation *ensures* its daemon: when none is running it
+    boots a fresh one, and on Windows that boot pre-launches the bundled Chrome engine,
+    which leaves a blank, unclosable ghost window on screen (created hidden, but DWM
+    keeps compositing its surface). The real-profile reuse probe must therefore NEVER
+    invoke the CLI on a cold start -- a probe followed by a fast failure (e.g. a locked
+    real profile, the normal state while the user's browser is open) would spawn an
+    engine the call never uses and leave the ghost behind.
+
+    Reads the daemon's own state files (``~/.agent-browser/<session>.{pid,port}``) and
+    requires BOTH a live PID and a reachable recorded port, so a stale file (dead
+    daemon, reused PID) can never masquerade as a running session.
+
+    Ported from upstream PR #105922.
+    """
+    state_dir = Path.home() / ".agent-browser"
+    try:
+        pid = int((state_dir / f"{session_name}.pid").read_text(encoding="utf-8").strip())
+        port = int((state_dir / f"{session_name}.port").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        # Lazy import: browser_tool_lifecycle imports this module at module level.
+        from tools.browser_tool_lifecycle import _pid_exists
+        if not _pid_exists(pid):
+            return False
+    except Exception:
+        return False  # liveness check unavailable: fail closed (do not probe the CLI)
+    return _tcp_reachable("127.0.0.1", port) or _tcp_reachable("::1", port)
 
 
 def _agent_browser_get_cdp(session_name: str, deadline: Optional[float] = None) -> Optional[str]:
@@ -429,7 +473,8 @@ def _real_profile_cdp(deadline: Optional[float] = None) -> tuple:
         # Cookies / Login Data) must NOT run while a live copy-browser (maybe from a previous
         # hermes process) holds the user-data-dir open — that corrupts the databases.
         copy_dir = real_profile_copy_dir(browser)
-        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION, deadline=deadline)
+        existing = (_agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION, deadline=deadline)
+                    if _agent_browser_daemon_alive(_bt._REAL_PROFILE_SESSION) else None)
         if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
             _bt._real_profile_cdp_cache["cdp"] = existing
             return existing, None

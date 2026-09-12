@@ -20,6 +20,17 @@ from tools import browser_tool_session as bt_session
 from tools import browser_tool_install as bt_install
 
 
+
+@pytest.fixture(autouse=True)
+def _daemon_alive_by_default():
+    """A probe de reuso so chama o agent-browser CLI quando o daemon ja esta vivo
+    (evita o ghost window do Windows, upstream #105922). Nos testes nao existe
+    daemon, entao sem este default o gate barra a probe e todo mock de
+    ``_agent_browser_get_cdp`` fica inalcancavel. Um teste que queira o caminho
+    frio sobrescreve com o seu proprio patch.object."""
+    with patch.object(bt_real_profile, "_agent_browser_daemon_alive", return_value=True):
+        yield
+
 class TestRealProfileResolvers:
     def test_data_dir_windows(self):
         import hermes_cli.browser_connect as bc
