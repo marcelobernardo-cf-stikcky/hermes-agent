@@ -1295,6 +1295,29 @@ def pytest_collection_modifyitems(config, items):  # noqa: D401 — pytest hook
             item.add_marker(skip_marker)
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """WinError 1314 is Developer Mode / admin, not a product bug.
+
+    Chrome/git/ACP tests create dangling symlinks the way POSIX hosts do;
+    on Windows without the privilege the same assertion is unreachable.
+    Convert that one OS error to skip so the rest of the file still runs.
+    """
+    outcome = yield
+    if sys.platform != "win32" or call.when != "call" or call.excinfo is None:
+        return
+    report = outcome.get_result()
+    if not report.failed:
+        return
+    if getattr(call.excinfo.value, "winerror", None) != 1314:
+        return
+    report.outcome = "skipped"
+    report.longrepr = (
+        "skipped: WinError 1314 (symlink privilege) — enable Developer Mode "
+        "or run on POSIX; not a product failure on this host"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _live_system_guard(request, monkeypatch):
     """Block real os.kill / systemctl / gateway-pid scans during tests.

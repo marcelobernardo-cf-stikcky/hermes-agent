@@ -142,6 +142,7 @@ class TestMatcher:
 # ── End-to-end subprocess behaviour ───────────────────────────────────────
 
 
+@pytest.mark.linux_only
 class TestCallbackSubprocess:
 
 
@@ -694,6 +695,7 @@ class TestEvaluateResult:
 # ── exit-2 / fail_closed end-to-end ──────────────────────────────────────
 
 
+@pytest.mark.linux_only
 class TestFailSemanticsEndToEnd:
     def test_exit_2_script_blocks(self, tmp_path):
         script = _write_script(
