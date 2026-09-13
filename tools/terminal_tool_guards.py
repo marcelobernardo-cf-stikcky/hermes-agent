@@ -28,10 +28,25 @@ logger = logging.getLogger("tools.terminal_tool")
 # shlex-quoted before reaching the shell.
 _WORKDIR_SAFE_ASCII_CHARS = frozenset('/\\:_-.~ +@=,')
 
+_KANBAN_READ_ONLY = frozenset({"show", "list", "runs", "log", "stats", "diagnostics"})
 _KANBAN_MUTATIONS = frozenset({
-    "block", "unblock", "complete", "request-review", "request-changes",
-    "reopen-review", "archive", "reassign", "claim", "promote",
+    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
+    "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
+    "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
+    "request-review", "request-changes", "reopen-review", "gc",
+    "boards",  # board mutations are classified after the boards action
 })
+_KANBAN_BOARD_READ_ONLY = frozenset({"list", "show"})
+
+_KANBAN_COMMAND_RE = re.compile(
+    r"(?<![\w-])hermes(?:\.exe)?\s+kanban(?:\s+([\w-]+))?(?:\s+([\w-]+))?",
+    re.IGNORECASE,
+)
+_PYTHON_KANBAN_RE = re.compile(
+    r"(?<![\w-])python(?:\d+(?:\.\d+)?)?\s+-m\s+hermes\s+kanban(?:\s+([\w-]+))?(?:\s+([\w-]+))?",
+    re.IGNORECASE,
+)
 
 
 def delegated_child_kanban_block(command: str) -> Optional[str]:
@@ -40,30 +55,20 @@ def delegated_child_kanban_block(command: str) -> Optional[str]:
 
     if not os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"):
         return None
-    try:
-        argv = shlex.split(command, posix=True)
-    except ValueError:
+    # Scan the original text as well as parsed argv: shell wrappers (-c), env
+    # assignments, and malformed quotes must not turn a write into an allow.
+    matches = list(_KANBAN_COMMAND_RE.finditer(command)) + list(_PYTHON_KANBAN_RE.finditer(command))
+    if not matches:
         return None
-    if argv and argv[0] == "env":
-        index = 1
-        while index < len(argv):
-            token = argv[index]
-            if token in ("-u", "--unset") and index + 1 < len(argv):
-                index += 2
-                continue
-            if token.startswith("-u") and len(token) > 2:
-                index += 1
-                continue
-            if token.startswith("--unset=") or ("=" in token and not token.startswith("-")):
-                index += 1
-                continue
-            if token == "--":
-                index += 1
-            break
-        argv = argv[index:]
-    if len(argv) < 3 or argv[0] not in {"hermes", "hermes.exe"}:
-        return None
-    if argv[1] != "kanban" or argv[2] not in _KANBAN_MUTATIONS:
+    for match in matches:
+        action, nested = (match.group(1) or "").lower(), (match.group(2) or "").lower()
+        if action in _KANBAN_READ_ONLY and not (action == "diagnostics" and nested not in {"", "--dry-run"}):
+            continue
+        if action == "boards" and nested in _KANBAN_BOARD_READ_ONLY:
+            continue
+        # No action, an unknown action, and every known mutator fail closed.
+        break
+    else:
         return None
     return _blocked_json(
         "Blocked: delegated children cannot mutate Kanban state. Use the Kanban tool in the parent.",

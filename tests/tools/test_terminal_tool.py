@@ -160,3 +160,32 @@ def test_delegated_child_cannot_bypass_kanban_write_guard_with_env_unset(monkeyp
 def test_delegated_child_can_read_kanban(monkeypatch):
     monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
     assert delegated_child_kanban_block("env -u HERMES_DELEGATED_CHILD_CONTEXT hermes kanban show") is None
+
+
+def test_delegated_child_cannot_hide_kanban_mutation_in_shell_wrapper(monkeypatch):
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    blocked = delegated_child_kanban_block("bash -c 'hermes kanban complete --task-id t1'")
+    assert blocked and "delegated children cannot mutate Kanban" in blocked
+
+
+def test_delegated_child_blocks_malformed_or_unknown_kanban_commands(monkeypatch):
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    assert delegated_child_kanban_block('hermes kanban complete "unterminated')
+    assert delegated_child_kanban_block("hermes kanban future-command")
+
+
+def test_terminal_pre_exec_wires_kanban_guard_before_execution(monkeypatch):
+    monkeypatch.setattr(
+        terminal_tool,
+        "delegated_child_kanban_block",
+        lambda command: '{"status":"blocked"}',
+    )
+    try:
+        terminal_tool._pre_exec_block(
+            "hermes kanban complete", env=None, env_type="local", cwd=".",
+            workdir=None, session_key="test",
+        )
+    except terminal_tool._Rejected as exc:
+        assert exc.result_json == '{"status":"blocked"}'
+    else:
+        raise AssertionError("terminal pre-exec guard was bypassed")
