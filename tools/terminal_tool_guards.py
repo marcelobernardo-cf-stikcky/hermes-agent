@@ -28,6 +28,48 @@ logger = logging.getLogger("tools.terminal_tool")
 # shlex-quoted before reaching the shell.
 _WORKDIR_SAFE_ASCII_CHARS = frozenset('/\\:_-.~ +@=,')
 
+_KANBAN_MUTATIONS = frozenset({
+    "block", "unblock", "complete", "request-review", "request-changes",
+    "reopen-review", "archive", "reassign", "claim", "promote",
+})
+
+
+def delegated_child_kanban_block(command: str) -> Optional[str]:
+    """Block Kanban writes even when the child shell removes its marker."""
+    import os
+
+    if not os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"):
+        return None
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if argv and argv[0] == "env":
+        index = 1
+        while index < len(argv):
+            token = argv[index]
+            if token in ("-u", "--unset") and index + 1 < len(argv):
+                index += 2
+                continue
+            if token.startswith("-u") and len(token) > 2:
+                index += 1
+                continue
+            if token.startswith("--unset=") or ("=" in token and not token.startswith("-")):
+                index += 1
+                continue
+            if token == "--":
+                index += 1
+            break
+        argv = argv[index:]
+    if len(argv) < 3 or argv[0] not in {"hermes", "hermes.exe"}:
+        return None
+    if argv[1] != "kanban" or argv[2] not in _KANBAN_MUTATIONS:
+        return None
+    return _blocked_json(
+        "Blocked: delegated children cannot mutate Kanban state. Use the Kanban tool in the parent.",
+        "blocked",
+    )
+
 
 def _is_safe_workdir_char(ch: str) -> bool:
     if not ch or ord(ch) < 32 or ord(ch) == 127:  # control chars / NUL

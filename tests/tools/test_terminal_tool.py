@@ -2,6 +2,7 @@
 
 import tools.terminal_tool as terminal_tool
 import tools.terminal_tool_sudo as terminal_tool_sudo
+from tools.terminal_tool_guards import delegated_child_kanban_block
 
 
 def setup_function():
@@ -146,3 +147,16 @@ def test_sudo_rewrite_preserves_env_operands_and_prose(monkeypatch):
 def test_count_real_sudo_invocations_ignores_mentions(monkeypatch):
     assert terminal_tool_sudo._count_real_sudo_invocations("grep sudo README.md") == 0
     assert terminal_tool_sudo._count_real_sudo_invocations("sudo a; sudo b") == 2
+
+
+def test_delegated_child_cannot_bypass_kanban_write_guard_with_env_unset(monkeypatch):
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    blocked = delegated_child_kanban_block(
+        "env -u HERMES_DELEGATED_CHILD_CONTEXT hermes kanban complete --task-id t1"
+    )
+    assert blocked and "delegated children cannot mutate Kanban" in blocked
+
+
+def test_delegated_child_can_read_kanban(monkeypatch):
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    assert delegated_child_kanban_block("env -u HERMES_DELEGATED_CHILD_CONTEXT hermes kanban show") is None
