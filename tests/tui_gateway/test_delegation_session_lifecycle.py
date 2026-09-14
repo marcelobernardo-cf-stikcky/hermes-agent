@@ -148,11 +148,28 @@ class TestFinalizeInterruptsOwnDelegations:
         mock_get_db.return_value = mock_db
 
         with patch("tools.async_delegation.interrupt_for_session") as mock_int:
-            _finalize_session(
-                self._make_session(session_key="agent:main:telegram:dm:123", sid="tab9"),
-                end_reason="ws_orphan_reap",
-            )
+            with patch("tools.approval.clear_session") as mock_clear:
+                _finalize_session(
+                    self._make_session(session_key="agent:main:telegram:dm:123", sid="tab9"),
+                    end_reason="ws_orphan_reap",
+                )
 
         kwargs = mock_int.call_args.kwargs
         assert kwargs["session_key"] == ""
         assert kwargs["origin_ui_session_id"] == "tab9"
+        mock_clear.assert_not_called()
+
+    @patch("tui_gateway.server._get_db")
+    def test_orphan_reap_kills_session_background_processes(self, mock_get_db):
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = {"source": "tui"}
+        mock_get_db.return_value = mock_db
+
+        with patch("tools.async_delegation.interrupt_for_session"):
+            with patch("tools.approval.clear_session"):
+                with patch("tools.process_registry.process_registry") as mock_registry:
+                    _finalize_session(self._make_session(), end_reason="ws_orphan_reap")
+
+        mock_registry.kill_for_session.assert_called_once_with(
+            "sess_A", source="session_ws_orphan_reap"
+        )

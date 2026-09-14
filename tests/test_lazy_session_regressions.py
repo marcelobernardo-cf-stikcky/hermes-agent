@@ -102,6 +102,28 @@ class TestFinalizeSessionUsesAgentSessionId:
         assert continuation["end_reason"] == "tui_close"
 
 
+    def test_finalize_clears_session_owned_kernel_state(self, tmp_path, monkeypatch):
+        """Session teardown must dispose persistent execute_code kernels."""
+        from tui_gateway import server
+
+        db = _make_session_db(tmp_path)
+        db.create_session(session_id="owned-session", source="tui", model="test")
+        agent = types.SimpleNamespace(session_id="owned-session")
+        session = _tui_session(agent=agent, session_key="owned-session")
+        clear_calls = []
+
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_notify_session_boundary", lambda *a: None)
+        monkeypatch.setattr(
+            "tools.approval.clear_session",
+            lambda session_key: clear_calls.append(session_key),
+        )
+
+        server._finalize_session(session, end_reason="ws_orphan_reap")
+
+        assert clear_calls == ["owned-session"]
+
+
 
 # ===========================================================================
 # Bug #20001: _sync_session_key_after_compress post-run_conversation

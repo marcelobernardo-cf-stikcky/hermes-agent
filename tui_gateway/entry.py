@@ -7,6 +7,8 @@ import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
 
+from hermes_cli.process_identity import attach_self_to_kill_on_close_job
+
 import json
 import logging
 import signal
@@ -239,6 +241,8 @@ def _write_or_exit(payload: dict, reason: str) -> None:
 
 
 def main():
+    # The stdio/Desktop backend is a process root; inherited shell trees must die with it.
+    attach_self_to_kill_on_close_job()
     _install_sidecar_publisher()
 
     # The heartbeat row lets the orphan sweep tell "live but idle" from "truly orphaned",

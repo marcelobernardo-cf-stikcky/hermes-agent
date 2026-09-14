@@ -268,6 +268,11 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                         _tui_owns_lifecycle = False
                     elif _tui_owns_lifecycle:
                         db.end_session(session_id, end_reason)
+    # Automatic reaping must also stop tracked background shells; explicit client close keeps intentional background work.
+    if _tui_owns_lifecycle and session_key and end_reason in _AUTOMATIC_SESSION_END_REASONS:
+        with contextlib.suppress(Exception):
+            from tools.process_registry import process_registry
+            process_registry.kill_for_session(str(session_key), source=f"session_{end_reason}")
     # In-flight async delegations end WITH the session (no return address left). Always interrupt by THIS live UI
     # sid; by durable session_key only when the TUI owns the lifecycle — a viewer tab must not kill gateway work.
     with contextlib.suppress(Exception):
@@ -275,6 +280,11 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         interrupt_for_session(
             session_key=str(session_key or "") if _tui_owns_lifecycle else "",
             origin_ui_session_id=_lifecycle_own_sid(session), reason=end_reason)
+    # Session kernels are persistent across turns; the finalization boundary must own their teardown too.
+    if _tui_owns_lifecycle and session_key:
+        with contextlib.suppress(Exception):
+            from tools.approval import clear_session
+            clear_session(str(session_key))
     # Close the slash-worker in this single ``_finalized``-guarded chokepoint (a direct caller can't leak it); idempotent.
     with contextlib.suppress(Exception):
         if worker := session.get("slash_worker"):

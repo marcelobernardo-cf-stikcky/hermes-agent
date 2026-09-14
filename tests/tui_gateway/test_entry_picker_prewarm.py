@@ -38,6 +38,7 @@ def _run_main(monkeypatch, events, *, prewarm=None):
     ``events`` receives ``("write", <event type>)`` for every write_json call
     and ``("prewarm",)`` when the spy fires, in call order.
     """
+    monkeypatch.setattr(entry, "attach_self_to_kill_on_close_job", lambda: False)
     monkeypatch.setattr(entry, "_install_sidecar_publisher", lambda: None)
     monkeypatch.setattr(entry, "ensure_mcp_discovery_started", lambda: None)
     monkeypatch.setattr(entry, "resolve_skin", lambda: "default")

@@ -78,6 +78,8 @@ import contextlib
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import threading
 import traceback
@@ -88,6 +90,28 @@ _SPILL_DIR = os.environ.get("HERMES_KERNEL_SPILL_DIR", "")
 _SPILL_CAP = {spill_cap}
 _PARENT_PROCESS_HANDLE = os.environ.pop("HERMES_KERNEL_PARENT_PROCESS_HANDLE", "")
 _PARENT_DEATH_FD = os.environ.pop("HERMES_KERNEL_PARENT_DEATH_FD", "")
+
+
+def _terminate_children_before_exit():
+    """Kill ordinary cell descendants before a parent-death exit."""
+    # ponytail: detached descendants need OS job supervision; normal trees are the incident path.
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return
+    try:
+        process_group = os.getpgid(0)
+        if process_group == os.getpid():
+            os.killpg(process_group, signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
 
 
 def _start_parent_death_pipe_watchdog():
@@ -117,6 +141,7 @@ def _start_parent_death_pipe_watchdog():
                 pass
         except OSError:
             pass
+        _terminate_children_before_exit()
         os._exit(0)
 
     threading.Thread(target=_wait, name="hermes-parent-watchdog", daemon=True).start()
@@ -167,6 +192,7 @@ def _start_parent_process_watchdog():
         finally:
             kernel32.CloseHandle(handle)
         if result == 0x00000000:  # WAIT_OBJECT_0: the parent exited
+            _terminate_children_before_exit()
             os._exit(0)
 
     threading.Thread(target=_wait, name="hermes-parent-watchdog", daemon=True).start()
@@ -365,10 +391,11 @@ class KernelRegistry:
         self.lock, self._teardown = threading.Lock(), teardown
 
     def shutdown(self, owner: Optional[str] = None) -> None:
-        """Tear down every kernel, or every kernel one owner (key[0]) holds."""
+        """Tear down every kernel, or an owner and its delegated descendants."""
         with self.lock:
             doomed = [self.kernels.pop(key) for key in list(self.kernels)
-                      if owner is None or key[0] == owner]
+                      if owner is None or key[0] == owner
+                      or key[0].startswith(owner + "::child::")]
         for kernel in doomed:
             self._teardown(kernel)
 

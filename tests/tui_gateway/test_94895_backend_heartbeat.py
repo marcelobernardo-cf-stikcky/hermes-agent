@@ -120,6 +120,8 @@ class TestEntryAndWsWiring:
         from tui_gateway import entry, server
 
         started = {"n": 0}
+        attached = []
+        monkeypatch.setattr(entry, "attach_self_to_kill_on_close_job", lambda: attached.append(True) or True)
 
         def _start():
             started["n"] += 1
@@ -138,6 +140,7 @@ class TestEntryAndWsWiring:
         monkeypatch.setattr(model_switch_providers, "prewarm_picker_cache_async", lambda: None)
 
         entry.main()
+        assert attached == [True]
         assert started["n"] == 1
 
     def test_handle_ws_starts_heartbeat_refresher(self, monkeypatch):

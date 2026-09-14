@@ -223,6 +223,7 @@ class TestScheduleStartupOrphanSweep:
 class TestEntryAndWsWiring:
     def test_main_schedules_sweep(self, monkeypatch):
         scheduled = {"n": 0}
+        monkeypatch.setattr(entry, "attach_self_to_kill_on_close_job", lambda: False)
 
         def _schedule():
             scheduled["n"] += 1
@@ -276,6 +277,7 @@ class TestEntryAndWsWiring:
         assert scheduled["n"] == 1
 
     def test_schedule_failure_does_not_break_main(self, monkeypatch):
+        monkeypatch.setattr(entry, "attach_self_to_kill_on_close_job", lambda: False)
         def _boom():
             raise RuntimeError("nope")
 

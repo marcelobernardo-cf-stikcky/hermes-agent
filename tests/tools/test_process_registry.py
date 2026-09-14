@@ -108,6 +108,30 @@ def test_kill_started_since_preserves_preexisting_and_foreign_processes(registry
     ]
 
 
+def test_kill_for_session_only_targets_matching_running_processes(registry):
+    mine = _make_session(sid="proc_mine")
+    mine.session_key = "session-a"
+    foreign = _make_session(sid="proc_foreign")
+    foreign.session_key = "session-b"
+    child = _make_session(sid="proc_child")
+    child.session_key = "session-a::child::1"
+    finished = _make_session(sid="proc_finished", exited=True, exit_code=0)
+    finished.session_key = "session-a"
+    registry._running[mine.id] = mine
+    registry._running[foreign.id] = foreign
+    registry._running[child.id] = child
+    registry._finished[finished.id] = finished
+
+    calls = []
+    registry.kill_process = lambda session_id, **kwargs: calls.append((session_id, kwargs)) or {"status": "killed"}
+
+    assert registry.kill_for_session("session-a", source="session_ws_orphan_reap") == 2
+    assert calls == [
+        ("proc_mine", {"source": "session_ws_orphan_reap", "consume_output": True}),
+        ("proc_child", {"source": "session_ws_orphan_reap", "consume_output": True}),
+    ]
+
+
 def test_kill_all_backward_compat_and_exclude_ids(registry):
     """kill_all keeps its historical default behavior (kill everything for
     the task, consume_output=False, source='kill_all') and honors the new

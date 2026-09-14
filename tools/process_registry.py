@@ -2001,6 +2001,21 @@ class ProcessRegistry(ProcessCheckpointMixin):
         timeout deliberately stopped."""
         return self.kill_all(task_id, exclude_ids=frozenset(baseline_ids or ()), source=source, consume_output=True)
 
+    def kill_for_session(self, session_key: str, *, source: str = "session_finalize") -> int:
+        """Kill running background processes owned by one gateway session."""
+        if not session_key:
+            return 0
+        with self._lock:
+            child_prefix = session_key + "::child::"
+            targets = [s for s in self._running.values()
+                       if not s.exited
+                       and (s.session_key == session_key
+                            or (s.session_key or "").startswith(child_prefix))]
+        return sum(
+            self.kill_process(s.id, source=source, consume_output=True).get("status")
+            in {"killed", "already_exited"}
+            for s in targets)
+
     def kill_all(
         self, task_id: Optional[str] = None, *, exclude_ids: frozenset = frozenset(),
         source: str = "kill_all", consume_output: bool = False) -> int:

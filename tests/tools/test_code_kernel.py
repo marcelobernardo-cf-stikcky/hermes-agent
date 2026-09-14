@@ -103,50 +103,84 @@ class TestSessionStatePersistence(unittest.TestCase):
 
 
 class TestKernelLifecycle(unittest.TestCase):
-    def test_kernel_exits_when_its_backend_parent_dies(self):
-        """A kernel must not outlive the host that spawned it, even when the
-        host dies without cleanup (SIGKILL/OOM/crash). Windows: inherited
-        SYNCHRONIZE handle; POSIX: inherited death pipe. Both are proven the
-        same way — kill the host mid-cell, the kernel is gone within seconds."""
+    def test_kernel_and_children_exit_when_its_backend_parent_dies(self):
+        """A kernel and every child it spawned must die when its host disappears.
+
+        The host can die without cleanup (SIGKILL/OOM/crash). Windows uses the
+        inherited SYNCHRONIZE handle; POSIX uses the inherited death pipe. The
+        child assertion closes the gap where the watchdog exited the kernel but
+        left a cell-spawned process behind.
+        """
         import psutil
 
         repo_root = str(Path(__file__).resolve().parents[2])
-        host_src = textwrap.dedent(f"""
-            import json, os, sys, time
-            os.environ["HERMES_HOME"] = sys.argv[1]
-            sys.path.insert(0, {repo_root!r})
-            from tools.code_kernel import SessionKernel, _spawn
-            k = SessionKernel(("parent-death",))
-            _spawn(k, task_id="parent-death", child_python=sys.executable,
-                   child_cwd="", sandbox_tools=frozenset(), max_tool_calls=1)
-            cell = json.dumps({{"id": "x", "code": "import os, time\\n"
-                "assert 'HERMES_KERNEL_PARENT_PROCESS_HANDLE' not in os.environ\\n"
-                "assert 'HERMES_KERNEL_PARENT_DEATH_FD' not in os.environ\\n"
-                "time.sleep(300)"}}) + "\\n"
-            k.proc.stdin.write(cell.encode()); k.proc.stdin.flush()
-            print(k.proc.pid, flush=True)
-            time.sleep(600)
-        """)
         with tempfile.TemporaryDirectory() as home:
+            child_pid_file = Path(home) / "child.pid"
+            child_pid_path = str(child_pid_file).replace("\\\\", "/")
+            cell_code = textwrap.dedent(f"""
+                import subprocess, sys, time
+                child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])
+                open({child_pid_path!r}, 'w', encoding='ascii').write(str(child.pid))
+                time.sleep(300)
+            """)
+            host_src = textwrap.dedent(f"""
+                import os, sys, threading, time
+                os.environ["HERMES_HOME"] = sys.argv[1]
+                sys.path.insert(0, {repo_root!r})
+                from tools.code_kernel import _KERNELS, execute_in_session_kernel
+                cell_code = {cell_code!r}
+                def run_cell():
+                    execute_in_session_kernel(
+                        cell_code, task_id="parent-death", mode="strict",
+                        child_python=sys.executable, child_cwd="",
+                        sandbox_tools=frozenset(), timeout=300, max_tool_calls=1,
+                        reset=False, is_interrupted=lambda: False,
+                    )
+                threading.Thread(target=run_cell, daemon=True).start()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    kernels = list(_KERNELS.values())
+                    if kernels and kernels[0].proc is not None:
+                        print(kernels[0].proc.pid, flush=True)
+                        break
+                    time.sleep(0.05)
+                time.sleep(600)
+            """)
             host = subprocess.Popen(
                 [sys.executable, "-c", host_src, home],
                 stdout=subprocess.PIPE, text=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            kernel = child = None
             try:
                 kernel = psutil.Process(int(host.stdout.readline()))
-                time.sleep(0.5)
+                deadline = time.monotonic() + 10
+                while not child_pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(child_pid_file.exists(), "kernel child never came up")
+                child = psutil.Process(int(child_pid_file.read_text(encoding="ascii")))
                 self.assertTrue(kernel.is_running(), "kernel never came up")
+                self.assertTrue(child.is_running(), "kernel child never came up")
                 host.kill()
                 host.wait(timeout=10)
                 try:
                     kernel.wait(timeout=10)
                 except psutil.TimeoutExpired:
-                    kernel.kill()
                     self.fail("session kernel survived its backend parent")
+                try:
+                    child.wait(timeout=10)
+                except psutil.TimeoutExpired:
+                    self.fail("session kernel child survived its backend parent")
             finally:
                 if host.poll() is None:
                     host.kill()
+                for process in (child, kernel):
+                    if process is not None:
+                        try:
+                            if process.is_running():
+                                process.kill()
+                        except psutil.Error:
+                            pass
 
     def test_timeout_kills_the_kernel_and_reports_state_loss(self):
         with _kernel_config(timeout=1):
@@ -284,17 +318,22 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
         self.assertIn("ISOLATED", peek.get("output", ""), peek)
 
     def test_session_clear_disposes_the_owners_kernels(self):
+        from agent.delegation_context import delegated_child_context
         from tools.approval import clear_session
 
         with _kernel_config():
             self._run_as("conv-a", "x = 41", task_id="turn-1")
-            self.assertEqual(len(_KERNELS), 1)
-            kernel = next(iter(_KERNELS.values()))
-            self.assertTrue(kernel.alive())
+            with delegated_child_context("child-a"):
+                self._run_as("conv-a", "child_x = 42", task_id="child-turn")
+            self.assertEqual(len(_KERNELS), 2)
+            kernels = list(_KERNELS.values())
+            self.assertTrue(all(kernel.alive() for kernel in kernels))
             clear_session("conv-a")
             self.assertEqual(len(_KERNELS), 0)
-            kernel.proc.wait(timeout=10)
-            self.assertFalse(kernel.alive())
+            for kernel in kernels:
+                assert kernel.proc is not None
+                kernel.proc.wait(timeout=10)
+                self.assertFalse(kernel.alive())
             # The next turn in a cleared session starts fresh.
             after = self._run_as("conv-a", "print('x' in dir())", task_id="turn-2")
         self.assertEqual(after["status"], "success", after)
@@ -358,7 +397,7 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
         used to see proc=None as 'dead', replace the registry entry, and
         orphan the winner's process — 110 live kernels under a 4-capped
         process (Sep 2026). Every kernel process must stay registry-owned."""
-        import subprocess
+        import psutil
         import threading
 
         results = []
@@ -372,11 +411,11 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
                 t.join()
         self.assertEqual([r["status"] for r in results], ["success"] * 6)
         self.assertEqual(len(_KERNELS), 1)
-        live = subprocess.run(
-            ["pgrep", "-fc", "-P", str(os.getpid()), "hermes_kernel_runner"],
-            capture_output=True, text=True,
-        ).stdout.strip()
-        self.assertEqual(live, "1")
+        live = sum(
+            "hermes_kernel_runner" in " ".join(child.cmdline())
+            for child in psutil.Process(os.getpid()).children(recursive=False)
+        )
+        self.assertEqual(live, 1)
 
 
 class TestPerCellRpcAuthority(unittest.TestCase):
