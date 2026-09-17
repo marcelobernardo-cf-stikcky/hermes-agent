@@ -397,6 +397,64 @@ describe('clarify and approvals (#90694)', () => {
     expect(room.turns.groupHasPendingClarify(room.chat.$groupClarify.get(), 'Core')).toBe(false)
   })
 
+  // #94822-class bug: a member Stop-held mid-poll (epoch bumped + a hold
+  // stamped for it, room otherwise still live) used to `return null` from
+  // pollGroupMemberTurn with no terminal Activity event and no stranded
+  // marker. The 'working' row then never cleared — reopening the whole
+  // Desktop was the only way to reset the in-memory Activity feed, and any
+  // reply that landed after the stop was silently dropped (no stranded
+  // marker for the next round's harvest to pick up).
+  it('marks a member cancelled and stranded when Stop holds it mid-poll', async () => {
+    runTimersInline()
+    const room = await loadRoom()
+    const rounds = await import('./group-rounds')
+    const activity = await import('./group-activity')
+    const member: GroupMember = { name: 'research', title: '' }
+
+    let entered!: () => void
+    let release!: () => void
+
+    const polled = new Promise<void>(resolve => {
+      entered = resolve
+    })
+
+    const held = new Promise<void>(resolve => {
+      release = resolve
+    })
+
+    const original = host.request as (method: string, params: Record<string, unknown>) => Promise<any>
+    let submitted = false
+
+    host.request = async (method: string, params: Record<string, unknown>) => {
+      if (method === 'session.resume' && submitted) {
+        entered()
+        await held
+        // Stop tore down the socket underneath this in-flight poll.
+        throw new Error('socket closed by stop')
+      }
+
+      const result = await original(method, params)
+
+      if (method === 'prompt.submit') {
+        submitted = true
+      }
+
+      return result
+    }
+
+    const turn = room.turns.runGroupChatMemberTurn('Core', member, 'check', 'thread', [])
+    await polled
+    // The real Stop button: bumps the room epoch and holds this member.
+    await rounds.stopGroupThread('Core', 'thread', [member])
+    release()
+
+    expect(await turn).toBeNull()
+
+    const events = activity.$groupActivity.get().Core?.events || []
+    expect(events.some(e => e.kind === 'cancelled' && e.member === 'research')).toBe(true)
+    expect(room.chat.$groupChats.get().Core?.stranded?.research).toBeTruthy()
+  })
+
   it('mirrors a question, badges needs-you, and is idempotent per request', async () => {
     const { chat, turns } = await loadRoom()
     const member: GroupMember = { name: 'research', title: '' }

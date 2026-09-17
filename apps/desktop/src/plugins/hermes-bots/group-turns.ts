@@ -761,6 +761,39 @@ interface GroupTurnPollContext {
   binding: { isLive(): boolean }
 }
 
+// A poll abandoned mid-flight because its member was explicitly held/stopped
+// (epoch bumped + a hold stamped for this member — see stopGroupThread) must
+// not exit silently: the Activity feed already has a 'working' row for this
+// member with no way to self-clear (runtime-only, never re-hydrated —
+// group-activity.ts), so it hangs forever in the UI even though nothing is
+// running anymore. 'cancelled' is the existing label for exactly this ('turn
+// interrupted by a newer message'); mark the turn stranded too so a
+// genuinely late reply still gets delivered by the next round's
+// harvestStrandedGroupReply instead of being dropped on the floor. A room
+// that is actually gone (disbanded/replaced — binding.isLive() false) must
+// stay untouched: there is nothing left to strand a marker onto.
+function abandonGroupTurn(context: GroupTurnPollContext) {
+  const { member, thread, before, binding } = context
+
+  if (!binding.isLive()) {
+    return
+  }
+
+  recordGroupActivity(context.group, {
+    kind: 'cancelled',
+    member: member.name,
+    thread
+  })
+  updateGroupChat(context.group, (r: GroupChatRoom) => {
+    r.stranded = {
+      ...(r.stranded || {}),
+      [groupMemberKey(member)]: { before, thread }
+    }
+
+    return r
+  })
+}
+
 async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null | string> {
   const { member, thread, dispatchEpoch, stored, liveRuntime, runtimeIds, before, binding } = context
   const memberKey = groupMemberKey(member)
@@ -785,12 +818,16 @@ async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null 
     // a hold, and that turn must keep polling so finished work can still be
     // delivered (the #93127 commit check decides its fate, not this loop).
     if (!binding.isLive()) {
+      abandonGroupTurn(context)
+
       return null
     }
 
     const roomDuringPoll = $groupChats.get()[context.group] || {}
 
     if ((roomDuringPoll.epoch || 0) !== dispatchEpoch && (roomDuringPoll.holds || {})[memberKey]) {
+      abandonGroupTurn(context)
+
       return null
     }
 
@@ -806,6 +843,8 @@ async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null 
     }
 
     if (!binding.isLive()) {
+      abandonGroupTurn(context)
+
       return null
     }
 
@@ -852,6 +891,8 @@ async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null 
   }
 
   if (!binding.isLive()) {
+    abandonGroupTurn(context)
+
     return null
   }
 
