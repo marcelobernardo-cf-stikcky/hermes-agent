@@ -269,3 +269,48 @@ describe('feed shape', () => {
     expect(label({ kind: 'settled', member: null })).toBe('turn settled')
   })
 })
+
+describe('stale working rows across rounds', () => {
+  // #94900-class bug: a room that ran multiple rounds in the same epoch (no
+  // Stop, no new send — just @mention handoffs) kept EVERY past round's
+  // 'is working…' row live with its own Stop button, because the view
+  // rendered every 'working' event instead of only the one still running.
+  it('a working row superseded by a later reply for the same member+thread is not live', async () => {
+    const room = await loadRoom()
+
+    room.chat.updateGroupChat('Stale', current => {
+      current.log = []
+
+      return current
+    })
+
+    room.activity.recordGroupActivity('Stale', { kind: 'working', member: 'lure', thread: 't1' })
+    room.activity.recordGroupActivity('Stale', { kind: 'replied', member: 'lure', thread: 't1' })
+    room.activity.recordGroupActivity('Stale', { kind: 'working', member: 'lure', thread: 't1' })
+
+    const events = room.activity.currentGroupActivity('Stale')
+
+    expect(events.map(e => e.kind)).toEqual(['working', 'replied', 'working'])
+    // The FIRST 'working' (index 0) is superseded by the 'replied' at index 1.
+    expect(room.activity.isGroupActivityWorkingSuperseded(events, 0)).toBe(true)
+    // The LAST 'working' (index 2) has nothing after it — still the live one.
+    expect(room.activity.isGroupActivityWorkingSuperseded(events, 2)).toBe(false)
+  })
+
+  it('a working row for a DIFFERENT member is not marked superseded by another member replying', async () => {
+    const room = await loadRoom()
+
+    room.chat.updateGroupChat('Cross', current => {
+      current.log = []
+
+      return current
+    })
+
+    room.activity.recordGroupActivity('Cross', { kind: 'working', member: 'lure', thread: 't1' })
+    room.activity.recordGroupActivity('Cross', { kind: 'replied', member: 'sadist', thread: 't1' })
+
+    const events = room.activity.currentGroupActivity('Cross')
+
+    expect(room.activity.isGroupActivityWorkingSuperseded(events, 0)).toBe(false)
+  })
+})

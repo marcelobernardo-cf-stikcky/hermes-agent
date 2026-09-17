@@ -69,6 +69,31 @@ export function currentGroupActivity(group: string) {
   return ($groupActivity.get()[group] || {}).events?.filter(event => (event.epoch || 0) === epoch) || []
 }
 
+const TERMINAL_ACTIVITY_KINDS = new Set<GroupActivityKind>([
+  'replied',
+  'passed',
+  'timed-out',
+  'failed',
+  'cancelled',
+  'delivered'
+])
+
+/** A 'working' row is stale once a later event for the SAME member+thread
+ *  landed — the round moved on and this member already has a newer status.
+ *  Without this, every past round's 'is working…' row keeps its live Stop
+ *  button forever, alongside the one row that is actually still running. */
+export function isGroupActivityWorkingSuperseded(events: GroupActivityEntry[], index: number) {
+  const event = events[index]
+
+  if (event.kind !== 'working') {
+    return false
+  }
+
+  return events
+    .slice(index + 1)
+    .some(later => later.member === event.member && later.thread === event.thread && TERMINAL_ACTIVITY_KINDS.has(later.kind))
+}
+
 /** Human label for one activity event, used by the collapsed summary and
  *  the expanded rows. */
 export function groupActivityLabel(event: GroupActivityEntry) {

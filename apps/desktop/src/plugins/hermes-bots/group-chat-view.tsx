@@ -54,7 +54,8 @@ import {
   currentGroupActivity,
   GROUP_ACTIVITY_GLYPHS,
   groupActivityLabel,
-  groupActivityTone
+  groupActivityTone,
+  isGroupActivityWorkingSuperseded
 } from './group-activity'
 import type { GroupActivityEntry } from './group-activity'
 import { filesToGroupAttachments, pickGroupAttachments } from './group-attachments'
@@ -756,31 +757,36 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
       {activityOpen ? (
         <div className="grid gap-0.5 px-2.5 pb-1.5" id={`group-activity:${group}`}>
           {activityEvents.length ? (
-            [...activityEvents].reverse().map((event, i) => (
-              <div className="flex items-center gap-1.5 text-[0.7rem]" key={`${event.at}:${i}`}>
-                <Codicon
-                  className={cn('shrink-0 text-[0.65rem]', groupActivityTone(event.kind))}
-                  name={GROUP_ACTIVITY_GLYPHS[event.kind] || 'circle-outline'}
-                />
-                <span className={cn('min-w-0 flex-1 truncate', groupActivityTone(event.kind))}>
-                  {groupActivityLabel(event)}
-                </span>
-                <span className="shrink-0 text-[0.625rem] text-(--ui-text-quaternary)">{relativeTime(event.at)}</span>
-                {event.kind === 'working' ? (
-                  <Tip label={b.group.stopHint}>
-                    <Button
-                      className="shrink-0 text-(--ui-accent)"
-                      onClick={() => void stopRoomRun()}
-                      size="micro"
-                      variant="ghost"
-                    >
-                      <Codicon name="debug-stop" />
-                      {b.group.stop}
-                    </Button>
-                  </Tip>
-                ) : null}
-              </div>
-            ))
+            [...activityEvents].reverse().map((event, i) => {
+              const chronologicalIndex = activityEvents.length - 1 - i
+              const superseded = isGroupActivityWorkingSuperseded(activityEvents, chronologicalIndex)
+
+              return (
+                <div className="flex items-center gap-1.5 text-[0.7rem]" key={`${event.at}:${i}`}>
+                  <Codicon
+                    className={cn('shrink-0 text-[0.65rem]', groupActivityTone(event.kind))}
+                    name={GROUP_ACTIVITY_GLYPHS[event.kind] || 'circle-outline'}
+                  />
+                  <span className={cn('min-w-0 flex-1 truncate', groupActivityTone(event.kind))}>
+                    {groupActivityLabel(event)}
+                  </span>
+                  <span className="shrink-0 text-[0.625rem] text-(--ui-text-quaternary)">{relativeTime(event.at)}</span>
+                  {event.kind === 'working' && !superseded ? (
+                    <Tip label={b.group.stopHint}>
+                      <Button
+                        className="shrink-0 text-(--ui-accent)"
+                        onClick={() => void stopRoomRun()}
+                        size="micro"
+                        variant="ghost"
+                      >
+                        <Codicon name="debug-stop" />
+                        {b.group.stop}
+                      </Button>
+                    </Tip>
+                  ) : null}
+                </div>
+              )
+            })
           ) : (
             <div className="px-0.5 pb-0.5 text-[0.625rem] text-(--ui-text-quaternary)">{b.group.noActivityYet}</div>
           )}
