@@ -3311,16 +3311,17 @@ def _publish_rotated_compaction(
     old_title = agent._session_db.get_session_title(agent.session_id)
     new_session_id = mint_session_id()
     from agent.context_compressor import _DB_PERSISTED_MARKER
-    agent._session_db.publish_compression_child(
-        parent_session_id=old_session_id, child_session_id=new_session_id,
-        source=_compression_child_source(agent, old_session_id), model=agent.model,
-        model_config=agent._session_init_model_config, system_prompt=new_system_prompt, messages=compressed,
-        cwd=getattr(agent, "working_directory", None), profile_name=_profile_for_child,
-        compression_lock_holder=lease.holder, require_compression_lease=lease.holder is not None,
-        require_lease_refresh=lease.holder is not None, lease_ttl_seconds=lease.ttl,
-        watermark=(lease.watermark if _foreign_tail_ceiling is not None else None),
-        watermark_ceiling=_foreign_tail_ceiling,
-    )
+    with _durable_current_user_content(agent, messages, compressed):
+        agent._session_db.publish_compression_child(
+            parent_session_id=old_session_id, child_session_id=new_session_id,
+            source=_compression_child_source(agent, old_session_id), model=agent.model,
+            model_config=agent._session_init_model_config, system_prompt=new_system_prompt, messages=compressed,
+            cwd=getattr(agent, "working_directory", None), profile_name=_profile_for_child,
+            compression_lock_holder=lease.holder, require_compression_lease=lease.holder is not None,
+            require_lease_refresh=lease.holder is not None, lease_ttl_seconds=lease.ttl,
+            watermark=(lease.watermark if _foreign_tail_ceiling is not None else None),
+            watermark_ceiling=_foreign_tail_ceiling,
+        )
     # `already_present` stamping is done by run_agent's _sync_persisted_markers;
     # this branch covers inserted/merged only; direct callers must use that wrapper.
     if compressed_user_turn_outcome in {"inserted", "merged"}:
@@ -3579,6 +3580,36 @@ class _CommitOutcome:
     made_progress: bool = False
 
 
+@contextlib.contextmanager
+def _durable_current_user_content(agent: Any, messages: list, compressed: list):
+    """While compacted rows are INSERTed, give the current-turn user row its persisted form (``@image:``
+    directives) instead of the model-only image hint: otherwise the carried row's display identity no longer
+    matches its pre-compaction twin and the Desktop renders the question twice/out of order. Live dicts are
+    restored afterwards — the model keeps the bytes it was sent."""
+    from agent.session_persistence import durable_user_row_content
+    idx = getattr(agent, "_persist_user_message_idx", None)
+    live = messages[idx] if isinstance(idx, int) and 0 <= idx < len(messages) else None
+    target = None
+    if isinstance(live, dict) and live.get("role") == "user":
+        target = next((m for m in reversed(compressed) if isinstance(m, dict) and m.get("role") == "user"
+                       and m.get("content") == live.get("content")), None)
+    if target is None:
+        yield
+        return
+    saved = (target.get("content"), "api_content" in target, target.get("api_content"))
+    target["content"], api_content = durable_user_row_content(agent, target, saved[0], saved[2])
+    if api_content is not None:
+        target["api_content"] = api_content
+    try:
+        yield
+    finally:
+        target["content"] = saved[0]
+        if saved[1]:
+            target["api_content"] = saved[2]
+        else:
+            target.pop("api_content", None)
+
+
 def _commit_compaction(
     agent: Any, messages: list, compressed: list, *, in_place: bool, lease: _CompressionLease,
     new_system_prompt: str, system_message: str, compressed_user_turn_outcome: str,
@@ -3619,11 +3650,12 @@ def _commit_compaction(
                 from agent.context_compressor import PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, stamp_db_persisted_markers
                 # Tail rows tagged by compress() are archived as superseded duplicates, not
                 # compacted=1. Count against the FINAL list — salvage may have dropped rows.
-                agent._session_db.archive_and_compact(
-                    agent.session_id, compressed, model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
-                    watermark=lease.watermark, lock_holder=lease.holder,
-                    tail_count=sum(1 for m in compressed if id(m) in _tail_tagged_ids),
-                )
+                with _durable_current_user_content(agent, messages, compressed):
+                    agent._session_db.archive_and_compact(
+                        agent.session_id, compressed, model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
+                        watermark=lease.watermark, lock_holder=lease.holder,
+                        tail_count=sum(1 for m in compressed if id(m) in _tail_tagged_ids),
+                    )
                 split_status = "in_place_committed"
                 # compress() returned marker-swept copies; stamp them as persisted or the next
                 # flush re-INSERTs the whole compacted transcript, doubling the live set. Reset
