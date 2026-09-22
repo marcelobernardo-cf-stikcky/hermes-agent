@@ -801,8 +801,21 @@ class SessionMessagesMixin:
                 "display_metadata": self._decode_display_metadata(row["display_metadata"])})
             if handoff is not None and live_view is not None:
                 dedupe_content = self._encode_content(live_view.get("content"))
+        elif row["role"] == "tool" and row["tool_call_id"] and row["timestamp"] is not None:
+            # Compaction prunes old tool output, so the content differs between generations; keying on it
+            # gave the pruned copy a fresh display_order far from its call ("Result unavailable" + a
+            # detached duplicate). (call id, timestamp) is stable across generations and unique per call.
+            dedupe_content = None
+        tool_calls = row["tool_calls"]
+        if row["role"] == "assistant" and tool_calls and row["timestamp"] is not None:
+            # Same pruning rewrites tool-call arguments; the call ids + timestamp identify the turn.
+            try:
+                tool_calls = repr(sorted(str(c.get("id")) for c in json.loads(tool_calls)))
+            except (TypeError, ValueError, AttributeError):
+                pass
+            dedupe_content = None
         return (row["role"], dedupe_content, row["timestamp"],
-                row["tool_call_id"], row["tool_calls"], row["tool_name"])
+                row["tool_call_id"], tool_calls, row["tool_name"])
 
     @staticmethod
     def _display_identity(key: Tuple[Any, ...]) -> bytes:
