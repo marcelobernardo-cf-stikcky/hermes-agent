@@ -1,7 +1,9 @@
-"""Turn-end guard for kanban workers, which must end with ``kanban_complete`` or
-``kanban_block``. Some models narrate the next step and stop with no tool calls;
-Hermes treats that as a clean exit → ``rc=0`` → dispatcher ``protocol_violation``.
-Policy-only: return a bounded synthetic nudge so the loop continues instead of exiting.
+"""Turn-end guard for kanban workers, which must end with a terminal board tool that hands
+the card to whoever owns it next (``kanban_complete``, ``kanban_block``,
+``kanban_request_review``, ``kanban_request_changes``). Some models narrate the next step
+and stop with no tool calls; Hermes treats that as a clean exit → ``rc=0`` → dispatcher
+``protocol_violation``. Policy-only: return a bounded synthetic nudge so the loop continues
+instead of exiting.
 """
 
 from __future__ import annotations
@@ -9,19 +11,31 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable, Optional
 
+from agent.delegation_context import owned_kanban_task
 
+
+# Every tool that ends this worker's responsibility for the card, not just the two that
+# close it out: ``kanban_request_review`` moves it to ``review`` (goals.py's continuation /
+# finalize prompts tell builders to call it) and ``kanban_request_changes`` returns it to
+# ``ready`` (the sdlc-review skill tells reviewers to). Nudging after either asks a worker
+# that did the right thing to ``kanban_complete`` a card it must not close.
 _TERMINAL_KANBAN_TOOLS = frozenset({
-    "kanban_complete", "kanban_block", "kanban_request_review",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_request_review",
+    "kanban_request_changes",
 })
 
 _DEFAULT_MAX_ATTEMPTS = 2
 
 
 def kanban_stop_nudge_enabled() -> bool:
-    """On when ``HERMES_KANBAN_TASK`` is set, unless ``HERMES_KANBAN_STOP_NUDGE`` disables it."""
+    """On when ``HERMES_KANBAN_TASK`` is set for the dispatcher-owned worker, unless
+    ``HERMES_KANBAN_STOP_NUDGE`` disables it. In-process delegate_task children and cron runs
+    inherit the env var but own no board task and carry no kanban toolset."""
     if (os.environ.get("HERMES_KANBAN_STOP_NUDGE") or "").strip().lower() in {"0", "false", "no", "off"}:
         return False
-    return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
+    return bool(owned_kanban_task())
 
 
 def _tool_call_name(tc: Any) -> str:
@@ -110,6 +124,8 @@ def build_kanban_stop_nudge(
         return None
 
     tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
+    # The transcript is the status source: this text is only reached when the session made no
+    # handoff call, so it never tells a worker to close a card it already sent to review.
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"
