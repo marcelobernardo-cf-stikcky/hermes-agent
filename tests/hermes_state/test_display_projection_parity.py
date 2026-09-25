@@ -209,6 +209,28 @@ class TestDisplayProjectionParity:
             ("user", "follow-up"),
         ]
 
+    def test_active_only_reload_uses_display_order_after_compaction(self, db):
+        """Model reload must not replay fresh compaction ids ahead of their logical tail."""
+        sid = "active-order-after-compaction"
+        db.create_session(sid, source="desktop")
+        db.append_messages_batch(sid, [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "follow-up"},
+        ])
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        db.archive_and_compact(sid, [
+            {"role": "assistant", "content": "[CONTEXT COMPACTION] summary", "_compressed_summary": True},
+            history[2], history[0], history[1],
+        ])
+
+        assert _texts(db.get_messages_as_conversation(sid)) == [
+            ("assistant", "[CONTEXT COMPACTION] summary"),
+            ("user", "question"),
+            ("assistant", "answer"),
+            ("user", "follow-up"),
+        ]
+
     def test_pre_compaction_turns_survive_in_the_resume_transcript(self, db):
         """The user's own first turn is still there after several compactions."""
         sid = _compact_in_place(db, "chat")
