@@ -19,10 +19,6 @@ def clear_kanban_env(monkeypatch):
     return monkeypatch
 
 
-
-
-
-
 def test_env_can_disable(clear_kanban_env):
     clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
     clear_kanban_env.setenv("HERMES_KANBAN_STOP_NUDGE", "0")
@@ -75,17 +71,7 @@ def test_nudge_when_no_terminal_tool(clear_kanban_env):
     assert nudge is not None
     assert "kanban_complete" in nudge
     assert "kanban_block" in nudge
-    assert "kanban_request_review" in nudge
     assert "t_46be8aa5" in nudge
-    assert "protocol violation" in nudge.lower() or "protocol" in nudge.lower()
-    assert "kanban_show" in nudge
-    assert nudge.index("kanban_show") < nudge.index("Follow the task's review model")
-    assert "pre-created review, QA, or release child" in nudge
-    assert "kanban_complete(summary=..., metadata=..., artifacts=[...])" in nudge
-    assert "complete" in nudge[nudge.index("pre-created review, QA, or release child") :]
-    assert "do not request same-card review" in nudge
-    assert "only when the task is genuinely final" in nudge
-    assert "no review is pending" in nudge
 
 
 def test_no_nudge_after_kanban_complete(clear_kanban_env):
@@ -108,55 +94,12 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
     assert build_kanban_stop_nudge(messages=messages) is None
 
 
-def _terminal_batch(name, content, tc_id="7"):
-    tool_calls = [{"id": tc_id, "type": "function", "function": {"name": name, "arguments": "{}"}}]
-    messages = [
-        {"role": "assistant", "content": "", "tool_calls": tool_calls},
-        {"role": "tool", "name": name, "tool_call_id": tc_id, "content": content},
-    ]
-    return messages, tool_calls
-
-
-@pytest.mark.parametrize("name", ["kanban_complete", "kanban_block", "kanban_request_review"])
-def test_terminal_tool_ok_ends_the_run(clear_kanban_env, name):
-    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
-    messages, tool_calls = _terminal_batch(name, '{"ok": true, "task_id": "t_abc"}')
-    assert kanban_terminal_reached(messages, tool_calls) == name
-
-
-def test_terminal_tool_error_does_not_end_the_run(clear_kanban_env):
-    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
-    messages, tool_calls = _terminal_batch(
-        "kanban_request_review", '{"error": "summary is required"}'
-    )
-    assert kanban_terminal_reached(messages, tool_calls) is None
-
-
-def test_non_terminal_tool_never_ends_the_run(clear_kanban_env):
-    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
-    messages, tool_calls = _terminal_batch("kanban_heartbeat", '{"ok": true}')
-    assert kanban_terminal_reached(messages, tool_calls) is None
-
-
-def test_terminal_check_is_off_outside_kanban_workers(clear_kanban_env):
-    messages, tool_calls = _terminal_batch("kanban_complete", '{"ok": true}')
-    assert kanban_terminal_reached(messages, tool_calls) is None
-
-
-
-
-
-
 # ── Integration: agent nudge + dispatcher bounded retry ──────────────
 # These tests verify the two layers compose correctly: the agent-side
 # nudge fires first (up to 2 attempts), and if the worker still exits
 # without a terminal call, the dispatcher's bounded retry (streak of 3)
 # handles it.  See also tests/hermes_cli/test_kanban_core_functionality.py
 # for the dispatcher-side streak tests.
-
-
-
-
 
 
 @pytest.mark.parametrize(

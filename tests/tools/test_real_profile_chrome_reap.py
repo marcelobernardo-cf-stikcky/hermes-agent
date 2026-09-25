@@ -71,6 +71,10 @@ def test_own_untracked_chrome_is_reaped(chrome_home, monkeypatch):
     try:
         monkeypatch.setattr(_origin(), "_real_profile_chrome_procs", [sibling])
         rp._record_real_profile_chrome(leaked.pid, copy_dir)
+        record_path = next(rp._chrome_state_dir().glob("*.json"))
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["last_used_at"] = time.time() - rp.IDLE_REAP_S - 1
+        record_path.write_text(json.dumps(record), encoding="utf-8")
         assert rp.reap_orphaned_real_profile_chrome() == 1
         assert leaked.wait(timeout=10) is not None
         assert sibling.poll() is None, "the tracked sibling must survive"

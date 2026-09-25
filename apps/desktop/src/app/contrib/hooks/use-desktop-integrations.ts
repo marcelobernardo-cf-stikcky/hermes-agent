@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 
+import { resumeAccountConnect } from '@/app/capabilities/connectors/data/deep-link'
 import { closeActiveTab } from '@/app/chat/close-tab'
 import { commandFocusedPreview } from '@/app/chat/right-rail/preview-nav'
 import { openSession } from '@/app/open-session'
@@ -32,6 +33,7 @@ import {
 } from '@/store/session'
 import { $botChatScopes, $sessionTiles, storedSessionIdForRuntimeId } from '@/store/session-states'
 import { onSessionsChanged } from '@/store/session-sync'
+import { requestSkillInstallFromDeepLink } from '@/store/skill-deeplink-install'
 import { openUpdatesWindow, startUpdatePoller, stopUpdatePoller } from '@/store/updates'
 import { isBrowserWindow, isHudWindow, isSecondaryWindow } from '@/store/windows'
 import type { SessionInfo } from '@/types/hermes'
@@ -311,6 +313,7 @@ export function useDesktopIntegrations({
   //    names toast an error and never fall back to a git-path install.
   //  - plugin/install?… (and legacy plugin-agent/plugin-desktop) → plugin install
   //    modal awaiting explicit confirmation. Never auto-installs.
+  //  - skill/install?identifier=… → confirmation, then the existing hub pipeline
   //  - blueprint/<name>?… → reviewable /blueprint command in the composer
   //  - <plugin>/<path>?… → in-app navigate (e.g. index-network/intent/1)
   //  - open/<path>?… → in-app navigate (generic)
@@ -331,10 +334,16 @@ export function useDesktopIntegrations({
       // The user finished a sign-in in their browser and the portal sent them back. Show the card
       // and wake its watcher; the link's status is not allowed to move any row.
       if (action.type === 'connection-done') {
-        void openConnectionDoneLink(action.op, navigate, runtimeId => {
-          const viaLocalMap = storedSessionIdForNotification(runtimeId, runtimeIdByStoredSessionId.current)
+        void resumeAccountConnect(action.op, navigate).then(handled => {
+          if (handled) {
+            return
+          }
 
-          return viaLocalMap !== runtimeId ? viaLocalMap : (storedSessionIdForRuntimeId(runtimeId) ?? runtimeId)
+          return openConnectionDoneLink(action.op, navigate, runtimeId => {
+            const viaLocalMap = storedSessionIdForNotification(runtimeId, runtimeIdByStoredSessionId.current)
+
+            return viaLocalMap !== runtimeId ? viaLocalMap : (storedSessionIdForRuntimeId(runtimeId) ?? runtimeId)
+          })
         })
 
         return
@@ -370,6 +379,16 @@ export function useDesktopIntegrations({
           legacyHint: action.legacyHint
         })
 
+        return
+      }
+
+      if (action.type === 'skill-install') {
+        void requestSkillInstallFromDeepLink(action.identifier)
+
+        return
+      }
+
+      if (payload.kind === 'skill') {
         return
       }
 

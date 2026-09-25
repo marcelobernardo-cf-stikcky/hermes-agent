@@ -742,7 +742,11 @@ def _spawn_detached(script_path: Path | None = None, home: Path | None = None) -
     """
     _assert_windows()
     argv, working_dir, env_overlay = _build_gateway_argv(home)
-    env = {**os.environ, **env_overlay}
+    from tools.environments.local import served_profile_child_env
+    # home=None is this process's own gateway, not a forced jump to the default root.
+    # served_profile_child_env overlays that home's secrets instead of os.environ.copy().
+    target = home if home is not None else _hermes_home()
+    env = {**served_profile_child_env(target_home=target, inherit_credentials=True), **env_overlay}
 
     # Stray print()/native stderr goes to a sidecar log; real gateway logs still land in gateway.log
     # via the logging FileHandler.
@@ -773,14 +777,31 @@ def _spawn_detached(script_path: Path | None = None, home: Path | None = None) -
     return proc.pid
 
 
-def _spawn_supervised() -> int:
-    """Launch the generated VBS supervisor as a detached process.
+def _stdin_is_interactive(*, isatty: bool, console_mode_ok: bool | None) -> bool:
+    """A human can answer a prompt only on a real console. The Windows CRT reports isatty()==True for
+    every character device — the NUL device included (`hermes gateway start < NUL`, stdin=DEVNULL) — so
+    isatty must be confirmed by GetConsoleMode accepting the handle (#113977). ``console_mode_ok`` is
+    None where that fact does not exist (not Windows) and isatty alone decides."""
+    return isatty and console_mode_ok is not False
 
-    The VBS process must stay alive while its Python child runs; it owns the
-    restart loop rendered by :func:`_build_gateway_vbs_script`. Starting the
-    VBS here makes manual ``gateway start`` and ``gateway restart`` use the
-    same recovery path as Windows login persistence.
-    """
+
+def _stdout_isatty() -> bool:
+    """The question is printed to stdout. When stdout is captured, nobody sees it. Desktop update
+    hand-offs before #122234 captured each step's stdout while leaving it the console's stdin, so a
+    prompt there waited forever for an answer to a question nobody saw."""
+    return sys.stdout is not None and sys.stdout.isatty()
+
+
+def _stdin_console_mode_ok() -> bool | None:
+    if sys.platform != "win32":
+        return None
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+    return bool(kernel32.GetConsoleMode(handle, ctypes.byref(ctypes.c_ulong())))
+
+
+def _spawn_supervised() -> int:
+    """Launch the generated VBS supervisor as a detached process."""
     _assert_windows()
     vbs_path = get_task_script_path().with_suffix(".vbs")
     if not vbs_path.is_file():
@@ -794,52 +815,36 @@ def _spawn_supervised() -> int:
         wscript = "wscript.exe"
 
     argv = [wscript, "//B", "//Nologo", str(vbs_path)]
-    from hermes_cli.config import get_hermes_home
-
-    working_dir = str(Path(get_hermes_home()).resolve())
+    working_dir = str(_hermes_home().resolve())
     env = {
         **os.environ,
         "HERMES_GATEWAY_DETACHED": "1",
         _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1",
     }
     flags = windows_detach_flags()
-    log_dir = Path(get_hermes_home()) / "logs"
+    log_dir = _hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     stray_log = log_dir / "gateway-stdio.log"
 
     try:
         with open(stray_log, "ab", buffering=0) as log_fh:
             proc = subprocess.Popen(
-                argv,
-                cwd=working_dir,
-                env=env,
-                creationflags=flags,
-                close_fds=True,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=log_fh,
+                argv, cwd=working_dir, env=env, creationflags=flags, close_fds=True,
+                stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh,
             )
         _LAST_SPAWN_BREAKAWAY_FALLBACK["fallback"] = False
     except OSError as exc:
-        error_code = getattr(exc, "winerror", None)
-        if error_code is None:
-            error_code = exc.errno
+        error_code = getattr(exc, "winerror", None) or exc.errno
         logger.warning(
-            "Gateway supervisor breakaway spawn failed (error=%s); retrying "
-            "without CREATE_BREAKAWAY_FROM_JOB",
+            "Gateway supervisor breakaway spawn failed (error=%s); retrying without CREATE_BREAKAWAY_FROM_JOB",
             error_code,
         )
         fallback_env = {**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}
         with open(stray_log, "ab", buffering=0) as log_fh:
             proc = subprocess.Popen(
-                argv,
-                cwd=working_dir,
-                env=fallback_env,
-                creationflags=windows_detach_flags_without_breakaway(),
-                close_fds=True,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=log_fh,
+                argv, cwd=working_dir, env=fallback_env,
+                creationflags=windows_detach_flags_without_breakaway(), close_fds=True,
+                stdin=subprocess.DEVNULL, stdout=log_fh, stderr=log_fh,
             )
         _LAST_SPAWN_BREAKAWAY_FALLBACK["fallback"] = True
     return proc.pid
@@ -1182,7 +1187,7 @@ def _consume_start_attestation(generation: str, home: Path | None = None) -> Non
 def _read_start_attestation(home: Path | None = None) -> object | None:
     """Parsed attestation payload (any JSON type), or ``None`` when absent/unreadable. Never raises."""
     try:
-        return json.loads(_start_attestation_path(home).read_text(encoding="utf-8"))
+        return json.loads(_start_attestation_path(home).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
 
@@ -1217,7 +1222,7 @@ def _attested_pid_exited_cleanly(pid: int, create_time: float | None = None, hom
         from gateway.lifecycle_ledger import get_lifecycle_sentinel_path
 
         sentinel = get_lifecycle_sentinel_path(home if home is not None else _hermes_home())
-        data = json.loads(sentinel.read_text(encoding="utf-8"))
+        data = json.loads(sentinel.read_text(encoding="utf-8-sig"))
     except OSError:
         return False
     except Exception:
@@ -1551,7 +1556,7 @@ def _probe_pid_file(pid_path: Path) -> int | None:
     if _probe_missing(1, pid_path, "PID file"):
         return None
     try:
-        data = json.loads(pid_path.read_text(encoding="utf-8"))
+        data = json.loads(pid_path.read_text(encoding="utf-8-sig"))
         pid_value = int(data.get("pid")) if data.get("pid") is not None else None
         _probe(1, True, f"PID file present: {pid_path} (pid={pid_value})")
         return pid_value
@@ -1600,7 +1605,7 @@ def _probe_state_file(state_path: Path) -> None:
     if _probe_missing(5, state_path, "gateway_state.json"):
         return
     try:
-        state_data = json.loads(state_path.read_text(encoding="utf-8"))
+        state_data = json.loads(state_path.read_text(encoding="utf-8-sig"))
         gateway_state = state_data.get("gateway_state")
         updated_at = state_data.get("updated_at")
         age_str = ""
@@ -1707,7 +1712,7 @@ def start() -> None:
             from hermes_cli.setup import is_interactive_stdin, is_noninteractive, prompt_yes_no
 
             print("✗ Gateway service is not installed")
-            if is_noninteractive() or not _stdin_is_interactive(
+            if is_noninteractive() or not _stdout_isatty() or not _stdin_is_interactive(
                 isatty=is_interactive_stdin(), console_mode_ok=_stdin_console_mode_ok()
             ):
                 start_on_login = False

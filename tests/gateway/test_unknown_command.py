@@ -228,27 +228,35 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_plugin_send_starts_agent_turn(monkeypatch):
+async def test_sync_plugin_command_runs_off_loop_thread(monkeypatch):
+    """A sync plugin handler doing blocking I/O must run off the gateway loop thread,
+    else the loop stops answering shutdown_watchdog probes and is killed with exit 75."""
+    import threading
+    import time
+
     import gateway.run as gateway_run
-    from hermes_cli import plugins as plugins_mod
+    from hermes_cli import plugins as _plugins_mod
 
     runner = _make_runner()
-    runner._run_agent = AsyncMock(
-        return_value={"final_response": "done", "messages": [], "api_calls": 0}
+    seen_threads = []
+
+    def _blocking_handler(args: str) -> str:
+        seen_threads.append(threading.current_thread().name)
+        time.sleep(0.15)
+        return f"sync {args}"
+
+    monkeypatch.setattr(
+        _plugins_mod,
+        "get_plugin_command_handler",
+        lambda name: _blocking_handler if name == "slow-api" else None,
     )
     monkeypatch.setattr(
         gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
-    monkeypatch.setattr(
-        plugins_mod,
-        "get_plugin_command_handler",
-        lambda name: (
-            lambda arg: {"type": "send", "message": f"audit {arg}"}
-        )
-        if name == "agent-prompt"
-        else None,
-    )
 
-    await runner._handle_message(_make_event("/agent-prompt repo"))
+    result = await runner._handle_message(_make_event("/slow-api arg"))
 
-    assert runner._run_agent.await_args.kwargs["message"] == "audit repo"
+    assert result == "sync arg"
+    assert seen_threads, "handler must have run"
+    # pytest-asyncio runs the loop on the main thread; the blocking handler must not.
+    assert seen_threads[0] != threading.main_thread().name

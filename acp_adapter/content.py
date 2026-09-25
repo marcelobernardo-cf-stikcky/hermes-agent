@@ -77,6 +77,9 @@ def _path_from_file_uri(uri: str) -> Path | None:
     if not raw:
         return None
 
+    # urlparse treats a bare Windows drive as a URI scheme.
+    if len(raw) >= 3 and raw[0].isalpha() and raw[1] == ":" and raw[2] in "/\\":
+        raw = "file:///" + raw.replace("\\", "/")
     parsed = urlparse(raw)
     if parsed.scheme and parsed.scheme != "file":
         return None

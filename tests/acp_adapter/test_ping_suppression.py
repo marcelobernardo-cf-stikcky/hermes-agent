@@ -99,6 +99,7 @@ class _FakeAgent:
         pass
 
 
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 @pytest.mark.linux_only
 async def test_bare_ping_request_produces_proper_response_and_no_stderr_noise(
