@@ -880,8 +880,11 @@ class SessionMessagesMixin:
                 updates = []
                 for row in rows:
                     last_id = row["id"]
-                    identity = self._display_identity(self._display_dedupe_key(row))
-                    order = first_id.setdefault(identity, last_id)
+                    # Only NULL rows are recomputed: a stored identity may be inherited from a compaction
+                    # origin whose payload pruning rewrote; re-hashing it splits the event ("Result unavailable").
+                    identity = row["display_identity"] or self._display_identity(self._display_dedupe_key(row))
+                    stored_order = row["display_order"] if row["display_identity"] else None
+                    order = first_id.setdefault(identity, last_id if stored_order is None else stored_order)
                     if order != row["display_order"] or identity != row["display_identity"]:
                         updates.append((order, identity, last_id))
                 rows.close()

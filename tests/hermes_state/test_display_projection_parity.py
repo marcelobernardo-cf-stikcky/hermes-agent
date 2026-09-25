@@ -105,6 +105,31 @@ class TestDisplayProjectionParity:
             "Earlier progress", "Later answer",
         ]
 
+    def test_unrelated_row_edit_keeps_inherited_identity_of_pruned_copies(self, db):
+        """Any identity-invalidating UPDATE (the turn prologue rewrites its user row every turn) triggers
+        the lazy backfill; it must not re-hash rows whose identity was inherited across a prune."""
+        sid = "pruned-then-edited"
+        db.create_session(sid, source="desktop")
+        db.append_messages_batch(sid, [
+            {"role": "user", "content": "go", "timestamp": 100.0},
+            {"role": "assistant", "content": "", "timestamp": 101.0, "tool_calls": [{
+                "id": "stable-call", "type": "function",
+                "function": {"name": "demo_tool", "arguments": json.dumps({"value": "L" * 4_000})}}]},
+            {"role": "tool", "content": "R" * 5_000, "tool_call_id": "stable-call",
+             "tool_name": "demo_tool", "timestamp": 102.0},
+        ])
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        history[1]["tool_calls"][0]["function"]["arguments"] = json.dumps({"value": "short"})
+        history[2]["content"] = "short result"
+        db.archive_and_compact(sid, history)
+        user_row = db.append_message(sid, "user", "raw keystrokes", timestamp=200.0)
+
+        db.set_user_message_content(sid, user_row, "expanded prompt")
+
+        # The REST transcript read (what Desktop reloads) is the one that runs the lazy backfill.
+        visible = db.get_messages(sid, include_compacted=True)
+        assert [m["role"] for m in visible] == ["user", "assistant", "tool", "user"]
+
     def test_payload_pruning_keeps_completed_assistant_at_its_display_origin(self, db):
         sid = "completed-assistant"
         db.create_session(sid, source="desktop")
