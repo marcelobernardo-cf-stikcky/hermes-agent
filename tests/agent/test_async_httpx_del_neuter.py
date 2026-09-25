@@ -309,6 +309,25 @@ class TestClientCacheBoundedGrowth:
             with _client_cache_lock:
                 _client_cache.pop(key, None)
 
+    def test_live_foreign_loop_entry_is_dropped_not_closed(self):
+        """Two sessions on two worker loops share one cache key. Evicting the other loop's live entry
+        must not close it: that client is mid-request (Claude subscription close() cancels it)."""
+        from agent.auxiliary_client import _client_cache, _client_cache_key, _client_cache_lock, _get_cached_client
+
+        key = _client_cache_key("test_foreign_live", async_mode=True, task="")
+        foreign_loop = asyncio.new_event_loop()  # still running elsewhere: NOT closed
+        in_flight = MagicMock()
+        with _client_cache_lock:
+            _client_cache[key] = (in_flight, "m", foreign_loop)
+        try:
+            with patch("agent.auxiliary_client.resolve_provider_client", return_value=(MagicMock(), "m")):
+                _get_cached_client("test_foreign_live", async_mode=True)
+            in_flight.close.assert_not_called()
+        finally:
+            foreign_loop.close()
+            with _client_cache_lock:
+                _client_cache.pop(key, None)
+
     def test_different_loops_do_not_grow_cache(self):
         """Multiple event loops for the same provider should NOT create multiple entries."""
         from agent.auxiliary_client import (

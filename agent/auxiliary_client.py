@@ -5918,9 +5918,11 @@ def _get_cached_client(
             )
             if loop_ok:
                 return cached_client, _compat_model(cached_client, model, cached_default)
-            # Stale async entry — evict. Only a closed owner loop may be awaited here; a live
-            # foreign loop stays force-neutered.
-            _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
+            # Stale async entry — evict. Only a closed owner loop may be closed here: a live foreign
+            # loop may be mid-request on it (a parallel session's vision call), and closing cancels
+            # that request. Drop it like the FIFO eviction below; refcount/GC reclaims it.
+            if cached_loop is None or cached_loop.is_closed():
+                _close_cached_client(cached_client, close_async=cached_loop is not None)
             del _client_cache[cache_key]
     # Build outside the lock. For pool-backed providers derive the key from the pool entry:
     # resolve_api_key_provider_credentials prefers env vars, which would bypass pool rotation
