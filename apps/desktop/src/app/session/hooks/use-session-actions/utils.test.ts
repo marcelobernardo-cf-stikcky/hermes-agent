@@ -952,6 +952,91 @@ describe('preserveLocalPendingTurnMessages', () => {
     ])
   })
 
+  // Order drift that accumulates until restart: history folds a tool-using
+  // turn into one row, but may store its commentary as `reasoning` (no text
+  // part to match), so each sealed live bubble fell to the tail and every
+  // rehydrate re-pinned it. Tool call ids are the durable identity.
+  it('retires sealed tool bubbles the fold carries, even under a newer prompt', () => {
+    const tool = (toolCallId: string) =>
+      ({ type: 'tool-call', toolCallId, toolName: 'terminal', result: 'ok' }) as ChatMessagePart
+
+    const sealed = (id: string, callId: string, text: string) =>
+      ({ id, role: 'assistant', parts: [tool(callId), { type: 'text', text }], interim: true }) as ChatMessage
+
+    const fold = {
+      id: '2-assistant',
+      role: 'assistant',
+      parts: [
+        { type: 'reasoning', text: 'logs clean.' },
+        tool('call-1'),
+        { type: 'reasoning', text: 'config fixed.' },
+        tool('call-2'),
+        { type: 'text', text: 'all done.' }
+      ]
+    } as ChatMessage
+
+    const liveTurn = [
+      sealed('assistant-stream-1', 'call-1', 'logs clean.'),
+      sealed('assistant-stream-2', 'call-2', 'config fixed.'),
+      msg('assistant-stream-3', 'assistant', 'all done.')
+    ]
+
+    const user = msg('1-user', 'user', 'fix it', { rowId: 1 })
+
+    expect(preserveLocalPendingTurnMessages([user, fold], [user, ...liveTurn]).map(message => message.id)).toEqual([
+      '1-user',
+      '2-assistant'
+    ])
+
+    const next = [user, fold, msg('3-user', 'user', 'and the other one', { rowId: 9 })]
+
+    const previous = [
+      msg('user-1', 'user', 'fix it'),
+      ...liveTurn,
+      msg('user-2', 'user', 'and the other one'),
+      sealed('assistant-stream-live', 'call-9', 'still going.')
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      '1-user',
+      '2-assistant',
+      '3-user',
+      'assistant-stream-live'
+    ])
+  })
+
+  // The tool-id arm must not eat a final answer the store has not committed.
+  it('keeps a settled final answer whose tools are committed but whose text is not', () => {
+    const tool = (toolCallId: string) =>
+      ({ type: 'tool-call', toolCallId, toolName: 'terminal', result: 'ok' }) as ChatMessagePart
+
+    const next = [
+      msg('1-user', 'user', 'fix it', { rowId: 1 }),
+      { id: '2-assistant', role: 'assistant', parts: [tool('call-1'), tool('call-2')] } as ChatMessage
+    ]
+
+    const previous = [
+      msg('user-1', 'user', 'fix it'),
+      {
+        id: 'assistant-stream-1',
+        role: 'assistant',
+        parts: [tool('call-1'), { type: 'text', text: 'checking' }],
+        interim: true
+      } as ChatMessage,
+      {
+        id: 'assistant-stream-final',
+        role: 'assistant',
+        parts: [tool('call-2'), { type: 'text', text: 'the uncommitted answer' }]
+      } as ChatMessage
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      '1-user',
+      '2-assistant',
+      'assistant-stream-final'
+    ])
+  })
+
   // #70720: the gateway persists an attached image as a leading `@image:<path>`
   // directive line, while the local optimistic composer keeps it as separate
   // `attachmentRefs`. A naive text compare (chatMessageText a === b) therefore

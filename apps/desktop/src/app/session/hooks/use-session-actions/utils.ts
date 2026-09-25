@@ -593,6 +593,19 @@ export function preserveLocalPendingTurnMessages(
   }
 
   const latestAuthoritativeUser = [...nextMessages].reverse().find(message => message.role === 'user')
+
+  // Tool call ids are the durable identity of a turn's rounds: history folds
+  // tool-separated segments into one row whose TEXT can differ from each
+  // sealed live bubble (commentary hydrated as reasoning, tool-only bubbles,
+  // rewritten content), but whose tool ids never do.
+  const committedToolIds = new Set(
+    nextMessages.flatMap(message =>
+      message.role === 'assistant' && !isLiveTailRow(message)
+        ? message.parts.flatMap(part => (part.type === 'tool-call' && part.toolCallId ? [part.toolCallId] : []))
+        : []
+    )
+  )
+
   const preserved: ChatMessage[] = []
   // Authoritative id → richer local pending row. Replacing (not appending)
   // avoids painting both the empty inflight shell and the full stream bubble.
@@ -708,7 +721,21 @@ export function preserveLocalPendingTurnMessages(
     //     the match, falls through to preserved.push, and pins below newer
     //     turns — the background-task "answer stuck at the bottom" report.
     if (isPendingAssistant) {
+      // A sealed interim (or text-less) bubble whose every tool call is
+      // already committed is carried by the fold. Left alone it falls to
+      // preserved.push, pins below newer turns, and every later rehydrate
+      // re-pins it — the order drift that grows until the app restarts. A
+      // final answer keeps the text arms below: its text may not be stored yet.
       const nextText = textWithoutReferenceLines(chatMessageText(message))
+      const toolIds = message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : []))
+
+      if (
+        (message.interim === true || (message.pending !== true && !nextText.trim())) &&
+        toolIds.length > 0 &&
+        toolIds.every(id => id && committedToolIds.has(id))
+      ) {
+        continue
+      }
 
       const committedMatch = nextMessages.find(
         candidate =>
