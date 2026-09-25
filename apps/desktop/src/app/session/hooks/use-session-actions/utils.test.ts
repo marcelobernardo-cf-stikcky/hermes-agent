@@ -1868,6 +1868,21 @@ describe('overlayConcurrentMessageChanges', () => {
     expect(overlaid[0].parts).toEqual([{ type: 'text', text: 'completed persisted answer' }])
   })
 
+  it('keeps a newly arrived row between its live neighbors during hydration', () => {
+    const baseline = [msg('first', 'user', 'first'), msg('last', 'assistant', 'last')]
+    const authoritative = [msg('first', 'user', 'first'), msg('last', 'assistant', 'last')]
+
+    const current = [
+      msg('first', 'user', 'first'),
+      msg('middle', 'assistant', 'arrived during hydration'),
+      msg('last', 'assistant', 'last')
+    ]
+
+    const overlaid = overlayConcurrentMessageChanges(authoritative, baseline, current)
+
+    expect(overlaid.map(message => message.id)).toEqual(['first', 'middle', 'last'])
+  })
+
   it('replaces an activation stream placeholder and appends rows created after the baseline', () => {
     const baseline = [msg('assistant-stream-runtime', 'assistant', 'partial A', { pending: true })]
     const authoritative = [msg('assistant-stream-activation', 'assistant', 'partial A', { pending: true })]

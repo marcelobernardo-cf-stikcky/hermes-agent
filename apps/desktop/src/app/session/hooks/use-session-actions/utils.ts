@@ -1206,6 +1206,8 @@ export function overlayConcurrentMessageChanges(
       message.role === 'assistant' && message.id.startsWith('assistant-stream-') && !baselineById.has(message.id)
   )
 
+  const additions: ChatMessage[] = []
+
   for (const current of currentMessages) {
     const baseline = baselineById.get(current.id)
     const changedSinceBaseline = !baseline || !chatMessagesEquivalent(baseline, current)
@@ -1244,8 +1246,30 @@ export function overlayConcurrentMessageChanges(
       continue
     }
 
-    nextIndexById.set(current.id, overlaid.length)
-    overlaid.push(current)
+    additions.push(current)
+  }
+
+  // Rows created while REST hydration was in flight keep their order from the
+  // live transcript. Appending them all to the tail makes a mid-turn session
+  // switch paint a later row before an earlier row that was already hydrated.
+  for (const addition of additions) {
+    const currentIndex = currentMessages.findIndex(message => message.id === addition.id)
+
+    const previousKnown = [...currentMessages.slice(0, currentIndex)]
+      .reverse()
+      .find(message => overlaid.some(candidate => candidate.id === message.id))
+
+    const nextKnown = currentMessages
+      .slice(currentIndex + 1)
+      .find(message => overlaid.some(candidate => candidate.id === message.id))
+
+    const insertionIndex = previousKnown
+      ? overlaid.findIndex(message => message.id === previousKnown.id) + 1
+      : nextKnown
+        ? overlaid.findIndex(message => message.id === nextKnown.id)
+        : overlaid.length
+
+    overlaid.splice(insertionIndex, 0, addition)
     changed = true
   }
 
