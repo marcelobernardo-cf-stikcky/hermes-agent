@@ -504,12 +504,13 @@ class SessionMessagesMixin:
         row = self._read_one("SELECT role FROM messages WHERE id = ? AND session_id = ? AND active = 1", (int(row_id), session_id))
         return row[0] if row else None
 
-    def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
+    def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]],
+                             display_orders: Optional[List[Optional[int]]] = None) -> tuple[int, int]:
         """Insert *messages* as fresh active rows in the caller's txn -> ``(inserted, tool_call_count)``.
         Never touches sessions.* counters (callers reconcile differently); reasoning kept for assistant rows."""
         now_ts = time.time()
         inserted = tool_calls_total = 0
-        for msg in messages:
+        for index, msg in enumerate(messages):
             role = msg.get("role", "unknown")
             tool_calls = _parse_tool_calls(msg.get("tool_calls"))
             message_timestamp = _coerce_timestamp(msg.get("timestamp"), now_ts)
@@ -539,9 +540,15 @@ class SessionMessagesMixin:
                         self._display_dedupe_key(origin_display))
                     origin_order = (origin_display["display_order"]
                                     if origin_display["display_order"] is not None else origin_display["id"])
+                    forced_order = display_orders[index] if display_orders is not None and index < len(display_orders) else None
                     conn.execute(
                         "UPDATE messages SET display_identity = ?, display_order = ? WHERE id = ?",
-                        (origin_identity, origin_order, cur.lastrowid),
+                        (origin_identity, origin_order if forced_order is None else forced_order, cur.lastrowid),
+                    )
+                elif display_orders is not None and index < len(display_orders) and display_orders[index] is not None:
+                    conn.execute(
+                        "UPDATE messages SET display_order = ? WHERE id = ?",
+                        (display_orders[index], cur.lastrowid),
                     )
             inserted += 1
             tool_calls_total += _tool_calls_count(tool_calls)
@@ -735,7 +742,37 @@ class SessionMessagesMixin:
                 conn.execute(f"{_ARCHIVE_ACTIVE_SQL} AND id NOT IN ({placeholders})", [session_id, *rewind_ids])
             else:
                 conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
-            inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
+            # Compaction emits a new summary before a carried tail. Tail copies keep durable display origins,
+            # so reserve slots before the earliest carried origin; otherwise the summary is inserted later but
+            # sorts after its own tail on every reload.
+            display_orders: Optional[List[Optional[int]]] = None
+            inherited_orders = []
+            first_inherited_index = None
+            for index, msg in enumerate(compacted_messages):
+                origin_id = msg.get("_row_id")
+                if not isinstance(origin_id, int) or isinstance(origin_id, bool):
+                    continue
+                origin = conn.execute(
+                    "SELECT COALESCE(display_order, id) FROM messages WHERE id = ? AND session_id = ?",
+                    (origin_id, session_id),
+                ).fetchone()
+                if origin is None:
+                    continue
+                first_inherited_index = index if first_inherited_index is None else first_inherited_index
+                inherited_orders.append(origin[0])
+            if first_inherited_index:
+                origin_order = min(inherited_orders)
+                conn.execute(
+                    "UPDATE messages SET display_order = display_order + ? "
+                    "WHERE session_id = ? AND display_order >= ?",
+                    (first_inherited_index, session_id, origin_order),
+                )
+                display_orders = [
+                    origin_order + index if index < first_inherited_index else None
+                    for index in range(len(compacted_messages))
+                ]
+            inserted, tool_calls_total = self._insert_message_rows(
+                conn, session_id, compacted_messages, display_orders=display_orders)
             if tail_ids:
                 self._clone_message_rows(conn, tail_ids)
                 inserted += len(tail_ids)

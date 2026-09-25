@@ -185,12 +185,35 @@ class TestDisplayProjectionParity:
             "target original", "new event",
         ]
 
+    def test_compaction_summary_precedes_carried_tail_on_reload(self, db):
+        """A new handoff row must occupy the slot before tail copies that retain old display origins."""
+        sid = "summary-before-tail"
+        db.create_session(sid, source="desktop")
+        db.append_messages_batch(sid, [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "follow-up"},
+        ])
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        compacted = [{"role": "assistant", "content": "[CONTEXT COMPACTION] summary", "_compressed_summary": True}]
+        # Compaction's protected tail can arrive out of insertion order after a repair; the minimum
+        # inherited origin, not the first copied row, is the boundary that must be shifted.
+        compacted.extend([history[2], history[0], history[1]])
+
+        db.archive_and_compact(sid, compacted)
+
+        assert _texts(db.get_messages(sid, include_compacted=True)) == [
+            ("assistant", "[CONTEXT COMPACTION] summary"),
+            ("user", "question"),
+            ("assistant", "answer"),
+            ("user", "follow-up"),
+        ]
+
     def test_pre_compaction_turns_survive_in_the_resume_transcript(self, db):
         """The user's own first turn is still there after several compactions."""
         sid = _compact_in_place(db, "chat")
 
         _, display = db.get_resume_conversations(sid)
-
         assert ("user", "e0 user 0") in _texts(display)
         assert ("assistant", "e0 assistant 0") in _texts(display)
 
