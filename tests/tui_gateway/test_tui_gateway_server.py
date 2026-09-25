@@ -3442,6 +3442,21 @@ def test_reconcile_display_with_live_trusts_db_when_tail_absent():
     assert server._reconcile_display_with_live(db_display, []) == db_display
 
 
+def test_reconcile_display_with_live_drops_persisted_rows_reordered_by_compaction():
+    """A compacted active tail can be persisted already but arrive after the DB anchor by insertion id."""
+    db_display = [
+        {"role": "user", "content": "a", "_row_id": 1},
+        {"role": "assistant", "content": "b", "_row_id": 2},
+        {"role": "assistant", "content": "c", "_row_id": 3},
+    ]
+    in_memory = [
+        db_display[0],
+        {"role": "assistant", "content": "c", "_row_id": 3, "_db_persisted": True},
+        {"role": "assistant", "content": "b", "_row_id": 2, "_db_persisted": True},
+    ]
+    assert server._reconcile_display_with_live(db_display, in_memory) == db_display
+
+
 def test_live_visible_history_matches_eager_resume_with_real_db(tmp_path):
     """E2E cross-builder consistency against a real SessionDB.
 

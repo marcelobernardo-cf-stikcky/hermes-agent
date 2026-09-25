@@ -2807,7 +2807,18 @@ def _reconcile_display_with_live(db_display: list[dict], in_memory: list[dict]) 
     last_shared = max((idx for idx, msg in enumerate(in_memory) if isinstance(msg, dict) and _key(msg) == anchor), default=-1)
     if last_shared == -1:
         return db_display  # DB tail not in memory (DB ahead, or diverged) — trust it over duplicating
-    return list(db_display) + list(in_memory[last_shared + 1 :])
+    db_keys = {_key(message) for message in db_display}
+    db_row_ids = {
+        message.get("_row_id") for message in db_display
+        if isinstance(message.get("_row_id"), int)
+    }
+    tail = []
+    for message in in_memory[last_shared + 1 :]:
+        row_id = message.get("_row_id")
+        if row_id in db_row_ids or (message.get("_db_persisted") and _key(message) in db_keys):
+            continue
+        tail.append(message)
+    return list(db_display) + tail
 
 
 def _live_visible_history(session: dict, db, in_memory_fallback: list[dict]) -> list[dict]:
