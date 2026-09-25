@@ -126,7 +126,16 @@ class TestDisplayProjectionParity:
 
         db.set_user_message_content(sid, user_row, "expanded prompt")
 
-        # The REST transcript read (what Desktop reloads) is the one that runs the lazy backfill.
+        # Read-only stores (the REST transcript endpoint) cannot backfill; they project NULL rows in
+        # memory and must still honour the inherited identities of the pruned copies.
+        reader = SessionDB(db.db_path, read_only=True)
+        try:
+            assert [m["role"] for m in reader.get_messages(sid, include_compacted=True)] == [
+                "user", "assistant", "tool", "user"]
+        finally:
+            reader.close()
+
+        # The writable read runs the lazy backfill.
         visible = db.get_messages(sid, include_compacted=True)
         assert [m["role"] for m in visible] == ["user", "assistant", "tool", "user"]
 

@@ -908,13 +908,17 @@ class SessionMessagesMixin:
                     ("idx_messages_session_id",),
                 ).fetchone() is not None
                 index_hint = "INDEXED BY idx_messages_session_id" if has_session_index else "NOT INDEXED"
+                has_identity = "display_identity" in set(self._message_column_names(conn))
                 rows = conn.execute(
                     "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, active, "
-                    f"display_kind, display_metadata FROM messages {index_hint} "
-                    f"WHERE session_id = ?{active_clause} ORDER BY id ASC",
+                    f"display_kind, display_metadata{', display_identity' if has_identity else ''} "
+                    f"FROM messages {index_hint} WHERE session_id = ?{active_clause} ORDER BY id ASC",
                     (session_id,))
                 for row in rows:
-                    identity = self._display_identity(self._display_dedupe_key(row))
+                    # A stored identity wins, same rule as _ensure_display_order: pruned compaction copies
+                    # inherit their origin's identity and re-hashing their rewritten payload splits the event.
+                    identity = (has_identity and row["display_identity"]) or self._display_identity(
+                        self._display_dedupe_key(row))
                     current = representatives.get(identity)
                     candidate = (row["active"], row["id"])
                     if current is None or candidate > current:
