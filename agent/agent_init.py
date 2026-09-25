@@ -2424,7 +2424,6 @@ def init_agent(
     # images from requests to those models only, so history keeps them for any model that can see.
     agent._image_rejecting_models = set()
 
-    _init_prompt_cache_config(agent)
     _init_turn_state(agent, run_budget_seconds)
     _setup_logging(agent)
     _set_defaults(agent, _STREAM_STATE)
@@ -2450,6 +2449,7 @@ def init_agent(
     _config_context_length, _custom_providers, _effective_context_length, _model_cfg = _resolve_context_length(
         agent, _agent_cfg, base_url
     )
+    _init_prompt_cache_config(agent)
     _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_context_length, session_db)
     _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length)
     _enforce_minimum_context(agent)
