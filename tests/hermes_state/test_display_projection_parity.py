@@ -224,12 +224,14 @@ class TestDisplayProjectionParity:
             history[2], history[0], history[1],
         ])
 
-        assert _texts(db.get_messages_as_conversation(sid)) == [
+        expected = [
             ("assistant", "[CONTEXT COMPACTION] summary"),
             ("user", "question"),
             ("assistant", "answer"),
             ("user", "follow-up"),
         ]
+        assert _texts(db.get_messages_as_conversation(sid)) == expected
+        assert _texts(db.get_messages(sid)) == expected
 
     def test_pre_compaction_turns_survive_in_the_resume_transcript(self, db):
         """The user's own first turn is still there after several compactions."""

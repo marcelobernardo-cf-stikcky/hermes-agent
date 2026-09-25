@@ -1009,9 +1009,10 @@ class SessionMessagesMixin:
     def get_messages(self, session_id: str, include_inactive: bool = False, include_compacted: bool = False,
                      limit: Optional[int] = None, offset: int = 0, latest: bool = False,
                      after_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Load messages in insertion order (id, never timestamp: clocks regress). ``include_inactive``:
+        """Load messages in durable logical order (``display_order``; ``id`` fallback). ``include_inactive``:
         rewind rows too; ``include_compacted``: compaction-archived display history (not rewind rows).
-        ``latest`` pages back from the newest but returns chronological order; ``after_id``: keyset paging."""
+        ``latest`` pages back from the newest but returns chronological order; ``after_id`` is an explicit
+        physical-insertion keyset used by flush reconciliation."""
         if after_id is not None and (latest or offset):
             raise ValueError("after_id is incompatible with latest/offset paging")
         if after_id is not None and include_compacted:
@@ -1042,7 +1043,9 @@ class SessionMessagesMixin:
                 session_id, active_clause=active_clause, limit=limit, offset=offset, latest=latest)
         else:
             sql = (f"SELECT * FROM messages WHERE session_id = ?{active_clause}"
-                f"{' AND id > ?' if after_id is not None else ''} ORDER BY id {'DESC' if latest else 'ASC'}")
+                f"{' AND id > ?' if after_id is not None else ''} "
+                f"ORDER BY {'id' if after_id is not None else 'COALESCE(display_order, id), id'} "
+                f"{'DESC' if latest else 'ASC'}")
             params: list = [session_id] if after_id is None else [session_id, after_id]
             if limit is not None or offset:
                 # SQLite's OFFSET requires LIMIT; -1 means "no limit".

@@ -2,6 +2,7 @@ import atexit
 import concurrent.futures
 import contextlib
 import contextvars
+from collections import Counter
 import copy
 import hashlib
 import importlib
@@ -2808,14 +2809,24 @@ def _reconcile_display_with_live(db_display: list[dict], in_memory: list[dict]) 
     if last_shared == -1:
         return db_display  # DB tail not in memory (DB ahead, or diverged) — trust it over duplicating
     db_keys = {_key(message) for message in db_display}
+    db_key_counts = Counter(_key(message) for message in db_display)
     db_row_ids = {
         message.get("_row_id") for message in db_display
         if isinstance(message.get("_row_id"), int)
     }
+    prefix_counts = Counter(_key(message) for message in in_memory[:last_shared + 1])
+    persisted_tail_counts = db_key_counts - prefix_counts
     tail = []
     for message in in_memory[last_shared + 1 :]:
         row_id = message.get("_row_id")
-        if row_id in db_row_ids or (message.get("_db_persisted") and _key(message) in db_keys):
+        key = _key(message)
+        if row_id in db_row_ids or (message.get("_db_persisted") and key in db_keys):
+            continue
+        # Compaction copies can retain an origin row id that is not the representative
+        # selected for db_display. Consume the missing logical occurrence, but keep a
+        # genuinely new duplicate after the anchor.
+        if persisted_tail_counts[key]:
+            persisted_tail_counts[key] -= 1
             continue
         tail.append(message)
     return list(db_display) + tail

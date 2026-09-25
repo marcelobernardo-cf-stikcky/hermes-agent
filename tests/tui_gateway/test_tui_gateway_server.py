@@ -3457,6 +3457,31 @@ def test_reconcile_display_with_live_drops_persisted_rows_reordered_by_compactio
     assert server._reconcile_display_with_live(db_display, in_memory) == db_display
 
 
+def test_reconcile_display_drops_old_compaction_generation_without_marker():
+    """An origin id from a copied generation is persisted even when the representative id changed."""
+    db_display = [
+        {"role": "user", "content": "a", "_row_id": 101},
+        {"role": "assistant", "content": "b", "_row_id": 102},
+        {"role": "tool", "content": "c", "_row_id": 103},
+    ]
+    in_memory = [
+        {"role": "user", "content": "a", "_row_id": 1},
+        {"role": "tool", "content": "c", "_row_id": 3},
+        {"role": "assistant", "content": "b", "_row_id": 2},
+    ]
+    assert server._reconcile_display_with_live(db_display, in_memory) == db_display
+
+
+def test_reconcile_display_keeps_new_duplicate_after_anchor():
+    """A real unflushed repeated message is not mistaken for an old compaction copy."""
+    db_display = [
+        {"role": "user", "content": "same", "_row_id": 1},
+        {"role": "assistant", "content": "done", "_row_id": 2},
+    ]
+    duplicate = {"role": "user", "content": "same"}
+    assert server._reconcile_display_with_live(db_display, db_display + [duplicate]) == db_display + [duplicate]
+
+
 def test_live_visible_history_matches_eager_resume_with_real_db(tmp_path):
     """E2E cross-builder consistency against a real SessionDB.
 
