@@ -160,3 +160,38 @@ def test_nudge_still_fires_for_non_terminal_kanban_tool(clear_kanban_env):
     # The nudge offers every worker exit, not just close-out; a card that must go
     # through review must never be steered to ``kanban_complete`` alone.
     assert "kanban_request_review" in nudge and "kanban_block" in nudge
+
+
+def _terminal_batch(name, content, tc_id="7"):
+    tool_calls = [{"id": tc_id, "type": "function", "function": {"name": name, "arguments": "{}"}}]
+    messages = [
+        {"role": "assistant", "content": "", "tool_calls": tool_calls},
+        {"role": "tool", "name": name, "tool_call_id": tc_id, "content": content},
+    ]
+    return messages, tool_calls
+
+
+@pytest.mark.parametrize("name", ["kanban_complete", "kanban_block", "kanban_request_review"])
+def test_terminal_tool_ok_ends_the_run(clear_kanban_env, name):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    messages, tool_calls = _terminal_batch(name, '{"ok": true, "task_id": "t_abc"}')
+    assert kanban_terminal_reached(messages, tool_calls) == name
+
+
+def test_terminal_tool_error_does_not_end_the_run(clear_kanban_env):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    messages, tool_calls = _terminal_batch(
+        "kanban_request_review", '{"error": "summary is required"}'
+    )
+    assert kanban_terminal_reached(messages, tool_calls) is None
+
+
+def test_non_terminal_tool_never_ends_the_run(clear_kanban_env):
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+    messages, tool_calls = _terminal_batch("kanban_heartbeat", '{"ok": true}')
+    assert kanban_terminal_reached(messages, tool_calls) is None
+
+
+def test_terminal_check_is_off_outside_kanban_workers(clear_kanban_env):
+    messages, tool_calls = _terminal_batch("kanban_complete", '{"ok": true}')
+    assert kanban_terminal_reached(messages, tool_calls) is None

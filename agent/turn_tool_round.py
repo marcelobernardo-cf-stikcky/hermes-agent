@@ -177,6 +177,21 @@ def run_tool_round(
                     agent.stream_delta_callback(None)
         return _verdict("break")
 
+    # Kanban worker: once kanban_complete / kanban_block / kanban_request_review returned ok the
+    # board owns the task; every further turn is budget spent on work nobody asked for.
+    try:
+        from agent.kanban_stop import kanban_terminal_reached
+        _kanban_terminal = kanban_terminal_reached(messages, assistant_message.tool_calls)
+    except Exception:
+        logger.debug("kanban terminal check failed", exc_info=True)
+        _kanban_terminal = None
+    if _kanban_terminal:
+        _turn_exit_reason = "kanban_terminal"
+        final_response = f"Task handed to the board via {_kanban_terminal}."
+        agent._emit_status(f"✅ Kanban worker finished: {_kanban_terminal}")
+        append_message(messages, {"role": "assistant", "content": final_response})
+        return _verdict("break")
+
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real
