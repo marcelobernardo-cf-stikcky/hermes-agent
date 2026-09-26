@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_existing_binary_skips_legacy_posix_shim_and_reuses_npm_cmd(tmp_path, monkeypatch):
     """A stale lsp/bin shim must not trigger npm when node_modules has .cmd."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -32,7 +32,7 @@ def test_existing_binary_skips_legacy_posix_shim_and_reuses_npm_cmd(tmp_path, mo
     assert install_mod._do_install("pyright") == str(native)
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_install_npm_returns_relative_cmd_wrapper_without_copying(tmp_path, monkeypatch):
     """Keep npm's .cmd beside its node_modules payload so relative paths work."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -56,7 +56,7 @@ def test_install_npm_returns_relative_cmd_wrapper_without_copying(tmp_path, monk
     assert not (install_mod.hermes_lsp_bin_dir() / native.name).exists()
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_link_into_bin_copies_when_symlink_is_unavailable(tmp_path, monkeypatch):
     """The existing Windows-safe copy fallback remains usable for native files."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
