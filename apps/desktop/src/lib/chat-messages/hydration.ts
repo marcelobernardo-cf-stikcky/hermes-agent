@@ -136,6 +136,19 @@ function displayContentForMessage(role: SessionMessage['role'], content: unknown
   return [missing.join('\n'), visibleText].filter(Boolean).join('\n\n') || visibleText
 }
 
+const STEER_MARKER_RE = /^\s*\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]\s*([\s\S]*?)\s*\[\/OUT-OF-BAND USER MESSAGE\]\s*$/
+
+/** A steer row's own words. The gateway's history projection already unwraps
+ *  the model-facing marker; the REST transcript (`SELECT *`) does not. Every
+ *  reader that compares a stored row with live text must go through this, or
+ *  the two sources disagree and the row pairs with nothing (appended at the
+ *  tail — the out-of-order transcript). */
+export function storedUserText(row: Pick<SessionMessage, 'content' | 'display_kind'>): string {
+  const content = String(row.content ?? '')
+
+  return row.display_kind === 'steer' ? content.match(STEER_MARKER_RE)?.[1]?.trim() || content : content
+}
+
 function transcriptContent(displayKind: SessionMessage['display_kind'], content: string): string | null {
   return displayKind === 'hidden' ? null : content
 }
@@ -240,6 +253,14 @@ function timelineDisplayContent(message: SessionMessage, content: string): strin
 
   if (message.display_kind === 'process_complete') {
     return timelineDisplayText(message.display_metadata) ?? 'background process finished'
+  }
+
+  // A mid-turn steer persists wrapped in the model-facing marker
+  // (agent/prompt_builder.py steer_user_row). Show the user's own words — the
+  // same text the live bubble and `inflight.corrections` carry, so the
+  // hydrated row pairs with them instead of reading as a new turn.
+  if (message.display_kind === 'steer') {
+    return storedUserText({ content, display_kind: 'steer' })
   }
 
   return content

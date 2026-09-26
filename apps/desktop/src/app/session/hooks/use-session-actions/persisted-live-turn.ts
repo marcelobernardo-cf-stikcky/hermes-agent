@@ -1,6 +1,7 @@
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import { withoutCoveredAssistantPrefix } from '@/lib/chat-messages/coverage'
+import { storedUserText } from '@/lib/chat-messages/hydration'
 import { parseErrorSurface } from '@/lib/error-surface'
 import type { SessionMessage, SessionResumeResult } from '@/types/hermes'
 
@@ -43,7 +44,7 @@ function candidateTurn(
 
   for (const row of rows.slice(start + 1)) {
     if (row.role === 'user') {
-      if (userText(String(row.content ?? '')) !== userText(corrections[intervals.length - 1] ?? '')) {
+      if (userText(storedUserText(row)) !== userText(corrections[intervals.length - 1] ?? '')) {
         return null
       }
 
