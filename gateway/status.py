@@ -583,6 +583,20 @@ def inline_source_flag_index(tokens: list[str]) -> int | None:
     return None
 
 
+def _launcher_bootstrap_argv(tokens: list[str]) -> list[str] | None:
+    """Trailing argv when *tokens* is the ``runtime_command`` bootstrap running hermes_cli.main, else None."""
+    flag_index = inline_source_flag_index(tokens)
+    if flag_index is None:
+        return None
+    for end in range(flag_index + 1, len(tokens)):
+        if tokens[end].endswith("alter_sys=True)"):
+            source = " ".join(tokens[flag_index + 1 : end + 1])
+            if "import hermes_bootstrap" in source and "run_module('hermes_cli.main'" in source:
+                return tokens[end + 1 :]
+            return None
+    return None
+
+
 def command_line_runs_inline_source(tokens: list[str]) -> bool:
     """True when *tokens* is an interpreter running INLINE SOURCE (``python -c <src> [args]``)."""
     return inline_source_flag_index(tokens) is not None
@@ -610,7 +624,11 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     # the inline source will spawn later, not to this process (#107002). Case-preserving tokens:
     # the operand-taking ``-X``/``-W``/``-Q`` must not be conflated with ``-q``/``-b``.
     if command_line_runs_inline_source(cased_tokens):
-        return None
+        # Exception: ``hermes_cli._launchers.runtime_command`` bootstrap runs hermes_cli.main
+        # IN-PROCESS via runpy, so its trailing argv IS this process's own argv.
+        own_argv = _launcher_bootstrap_argv(cased_tokens)
+        return None if own_argv is None else _gateway_command_subcommand(
+            " ".join(["hermes_cli/main.py", *own_argv]))
     # The launchd job's osascript wrapper (gateway_launchd.launchd_program_arguments) carries the gateway argv
     # inside one AppleScript string; the gateway itself is its child and is matched on its own command line.
     if basenames[0] == "osascript":
