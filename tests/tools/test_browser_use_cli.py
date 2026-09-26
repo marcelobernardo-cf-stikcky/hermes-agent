@@ -13,6 +13,7 @@ Covers the three seams the integration relies on:
 """
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -67,8 +68,19 @@ def _fake_supervisor_registry(monkeypatch):
 
 def _fake_cli(tmp_path, body):
     """Write an executable fake browser-use CLI and return its path."""
+    shell = "#!/bin/sh\n" + body
+    if os.name == "nt":
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("portable shell is required for the fake CLI on Windows")
+        script = tmp_path / "browser-use.sh"
+        script.write_text(shell, encoding="utf-8")
+        wrapper = tmp_path / "browser-use.cmd"
+        wrapper.write_text(f'@echo off\r\n"{bash}" "{script}"\r\n', encoding="utf-8")
+        return str(wrapper)
+
     script = tmp_path / "browser-use"
-    script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    script.write_text(shell, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script)
 
@@ -810,7 +822,7 @@ class TestNativeScreenshots:
         kinds = [part["type"] for part in result["content"]]
         assert kinds == ["text", "image_url"]
         assert result["meta"]["screenshot_path"] == shot
-        assert shot in result["text_summary"]
+        assert json.dumps(shot)[1:-1] in result["text_summary"]
 
     def test_text_only_model_gets_plain_result_with_path(self, tmp_path, monkeypatch):
         shot = self._shot(tmp_path)
