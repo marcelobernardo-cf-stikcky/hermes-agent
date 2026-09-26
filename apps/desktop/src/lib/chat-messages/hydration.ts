@@ -136,7 +136,9 @@ function displayContentForMessage(role: SessionMessage['role'], content: unknown
   return [missing.join('\n'), visibleText].filter(Boolean).join('\n\n') || visibleText
 }
 
-const STEER_MARKER_RE = /^\s*\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]\s*([\s\S]*?)\s*\[\/OUT-OF-BAND USER MESSAGE\]\s*$/
+// Unanchored, like agent/conversation_compression._extract_steer_text_from_message:
+// a steer carried through compaction sits after the summary prefix.
+const STEER_MARKER_RE = /\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]\s*([\s\S]*?)\s*\[\/OUT-OF-BAND USER MESSAGE\]/
 
 /** A steer row's own words. The gateway's history projection already unwraps
  *  the model-facing marker; the REST transcript (`SELECT *`) does not. Every

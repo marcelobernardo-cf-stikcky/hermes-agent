@@ -51,6 +51,12 @@ describe('steer row hydration', () => {
     expect(Object.getOwnPropertySymbols(result).length).toBe(1)
   })
 
+  it('unwraps a steer carried through compaction behind the summary prefix', () => {
+    const compacted = { ...steerRest, content: `[CONTEXT COMPACTION — REFERENCE ONLY] summary\n\n${MARKED}` }
+
+    expect(toChatMessages([prompt, compacted]).map(chatMessageText)).toEqual(['make a video', 'use a new base'])
+  })
+
   it('leaves a non-steer user row that quotes the marker untouched', () => {
     expect(toChatMessages([{ role: 'user', content: MARKED }]).map(chatMessageText)).toEqual([MARKED])
   })
