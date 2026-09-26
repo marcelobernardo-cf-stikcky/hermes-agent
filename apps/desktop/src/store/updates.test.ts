@@ -344,11 +344,47 @@ describe('reportBackendContract', () => {
 
   it('clears the snooze once the backend catches up, so a regression warns again', () => {
     reportBackendContract(1)
-    lastToast().onDismiss()
+    lastToast().onDismiss() // user closes it → cooldown starts
     notifySpy.mockClear()
 
     reportBackendContract(REQUIRED_BACKEND_CONTRACT) // backend updated → satisfied, snooze cleared
     reportBackendContract(5) // a later regression must warn immediately
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('warns when the GUI is older than the backend (contract ahead of this build)', () => {
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT + 1)
+    // The backend-older toast must not fire — this is the reverse direction.
+    expect(dismissSpy).toHaveBeenCalledWith('backend-contract-skew')
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+    expect(notifySpy.mock.calls[0]?.[0]).toMatchObject({ id: 'gui-contract-skew', kind: 'warning' })
+  })
+
+  it('gui-skew warning snoozes on close and reminds after the cooldown', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT + 1)
+    lastToast().onDismiss() // user closes it → cooldown starts
+    notifySpy.mockClear()
+
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT + 1) // another session open within the cooldown
+    expect(notifySpy).not.toHaveBeenCalled()
+
+    vi.setSystemTime(25 * 60 * 60 * 1000) // > 24h cooldown
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT + 1)
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the gui-skew toast + snooze once versions align, so a later skew warns again', () => {
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT + 1)
+    lastToast().onDismiss()
+    notifySpy.mockClear()
+
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT) // GUI updated (or backend rolled back) → aligned
+    expect(dismissSpy).toHaveBeenCalledWith('gui-contract-skew')
+
+    reportBackendContract(REQUIRED_BACKEND_CONTRACT + 1) // a later skew must warn immediately
     expect(notifySpy).toHaveBeenCalledTimes(1)
   })
 })
@@ -1500,6 +1536,232 @@ describe('startUpdatePoller', () => {
     listeners['focus']?.()
     await vi.advanceTimersByTimeAsync(0)
     expect(checkMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-checks backend updates when switching directly between two remote profiles', async () => {
+    // Both profiles resolve to mode: 'remote' — only baseUrl differs. A
+    // mode-only comparison would treat this as "no change" and never
+    // re-check, leaving profile A's stale status on screen for profile B.
+    checkHermesUpdateSpy.mockReset()
+    checkHermesUpdateSpy.mockResolvedValue({
+      install_method: 'git',
+      current_version: '0.16.0',
+      behind: 1,
+      update_available: true,
+      can_apply: true,
+      update_command: 'hermes update',
+      message: null
+    })
+
+    setConnection({
+      baseUrl: 'http://profile-a:9119',
+      isFullscreen: false,
+      mode: 'remote',
+      nativeOverlayWidth: 0,
+      token: 't',
+      wsUrl: 'ws://profile-a:9119',
+      logs: [],
+      windowButtonPosition: null
+    })
+
+    startUpdatePoller()
+    await vi.advanceTimersByTimeAsync(0)
+    checkHermesUpdateSpy.mockClear()
+
+    setConnection({
+      baseUrl: 'http://profile-b:9119',
+      isFullscreen: false,
+      mode: 'remote',
+      nativeOverlayWidth: 0,
+      token: 't',
+      wsUrl: 'ws://profile-b:9119',
+      logs: [],
+      windowButtonPosition: null
+    })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(checkHermesUpdateSpy).toHaveBeenCalled()
+  })
+
+  it('re-checks backend updates when switching between two profiles on the same remote backend', async () => {
+    // Pooled profiles share a baseUrl; only the profile field differs. The
+    // update check is profile-scoped (per-profile overrides can pin a
+    // different channel/branch), so a baseUrl-only key would treat this as
+    // "no change" and keep the first profile's status on screen.
+    checkHermesUpdateSpy.mockReset()
+    checkHermesUpdateSpy.mockResolvedValue({
+      install_method: 'git',
+      current_version: '0.16.0',
+      behind: 1,
+      update_available: true,
+      can_apply: true,
+      update_command: 'hermes update',
+      message: null
+    })
+
+    const pooled = (profile: string) => ({
+      baseUrl: 'http://shared-box:9119',
+      isFullscreen: false,
+      mode: 'remote' as const,
+      nativeOverlayWidth: 0,
+      profile,
+      token: 't',
+      wsUrl: 'ws://shared-box:9119',
+      logs: [],
+      windowButtonPosition: null
+    })
+
+    setConnection(pooled('alpha'))
+    startUpdatePoller()
+    await vi.advanceTimersByTimeAsync(0)
+    checkHermesUpdateSpy.mockClear()
+
+    setConnection(pooled('beta'))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(checkHermesUpdateSpy).toHaveBeenCalled()
+  })
+
+  it('discards a stale in-flight response and re-checks after switching to B before A resolves', async () => {
+    // A's check is still in flight when the switch to B happens — B's
+    // trigger is locked out by $backendUpdateChecking. Once A's (now stale)
+    // response lands it must not overwrite the display with A's result, and
+    // B's own check must still run once the lock clears.
+    checkHermesUpdateSpy.mockReset()
+
+    let resolveA: (value: unknown) => void = () => {}
+
+    const aPending = new Promise(resolve => {
+      resolveA = resolve
+    })
+
+    checkHermesUpdateSpy.mockImplementationOnce(() => aPending)
+    checkHermesUpdateSpy.mockResolvedValueOnce({
+      install_method: 'git',
+      current_version: '0.17.0',
+      behind: 4,
+      update_available: true,
+      can_apply: true,
+      update_command: 'hermes update',
+      message: null
+    })
+
+    setConnection({
+      baseUrl: 'http://profile-a:9119',
+      isFullscreen: false,
+      mode: 'remote',
+      nativeOverlayWidth: 0,
+      token: 't',
+      wsUrl: 'ws://profile-a:9119',
+      logs: [],
+      windowButtonPosition: null
+    })
+
+    startUpdatePoller()
+    // A's checkHermesUpdate() call is now in flight (aPending unresolved).
+    // Switch profiles before it settles.
+
+    setConnection({
+      baseUrl: 'http://profile-b:9119',
+      isFullscreen: false,
+      mode: 'remote',
+      nativeOverlayWidth: 0,
+      token: 't',
+      wsUrl: 'ws://profile-b:9119',
+      logs: [],
+      windowButtonPosition: null
+    })
+
+    // Now A's slow response lands.
+    resolveA({
+      install_method: 'git',
+      current_version: '0.16.0',
+      behind: 1,
+      update_available: true,
+      can_apply: true,
+      update_command: 'hermes update',
+      message: null
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    // Flush the automatic follow-up check queued for B once A's lock cleared.
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(checkHermesUpdateSpy).toHaveBeenCalledTimes(2)
+    // B's result (behind: 4), not A's stale one (behind: 1).
+    expect($backendUpdateStatus.get()?.behind).toBe(4)
+  })
+})
+
+describe('discontinued retirement notice', () => {
+  const applyMock = vi.fn()
+  const checkMock = vi.fn()
+
+  const discontinuedStatus = (): DesktopUpdateStatus => ({
+    supported: true,
+    fetchedAt: 0,
+    retirement: { state: 'discontinued', destination: 'stable', version: '1.2.3' }
+  })
+
+  beforeEach(() => {
+    storage.clear()
+    notifySpy.mockClear()
+    dismissSpy.mockClear()
+    applyMock.mockClear()
+    checkMock.mockReset()
+    resetUpdateApplyState()
+    $updateStatus.set(null)
+    $updateOverlayOpen.set(false)
+    checkMock.mockImplementation(async () => discontinuedStatus())
+    ;(globalThis as unknown as { window: unknown }).window = {
+      hermesDesktop: { updates: { apply: applyMock, check: checkMock } }
+    }
+    vi.useRealTimers()
+  })
+
+  afterEach(() => {
+    delete (globalThis as unknown as { window?: unknown }).window
+  })
+
+  it('checkUpdates surfaces the discontinued warning and never offers an apply', async () => {
+    await checkUpdates({ force: true })
+
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+    expect(notifySpy.mock.calls[0]?.[0]).toMatchObject({ kind: 'warning', id: 'desktop-build-discontinued' })
+    // The ordinary update toast must stay silent: nothing can be downloaded.
+    expect(notifySpy.mock.calls[0]?.[0]).not.toMatchObject({ icon: 'gift' })
+
+    // The generic update entry point refuses instead of dispatching an apply.
+    const result = await applyUpdates()
+    expect(result).toMatchObject({ ok: false, error: 'retirement-blocked' })
+    expect(applyMock).not.toHaveBeenCalled()
+  })
+
+  it('dismissal persists per channel revision: a re-check stays quiet, a new retirement re-notifies', async () => {
+    await checkUpdates({ force: true })
+    ;(notifySpy.mock.calls[0]?.[0] as { onDismiss: () => void }).onDismiss()
+    notifySpy.mockClear()
+
+    // Plain re-check of the same retired revision: no nag.
+    await checkUpdates({ force: true })
+    expect(notifySpy).not.toHaveBeenCalled()
+
+    // The publisher pins a new destination version → the notice returns.
+    checkMock.mockImplementation(async () => ({
+      ...discontinuedStatus(),
+      retirement: { state: 'discontinued', destination: 'stable', version: '1.3.0' }
+    }))
+    await checkUpdates({ force: true })
+    expect(notifySpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('a retirement that is not discontinued never raises the notice', async () => {
+    checkMock.mockImplementation(async () => ({
+      ...discontinuedStatus(),
+      retirement: { state: 'available', destination: 'stable', version: '1.2.3' }
+    }))
+    await checkUpdates({ force: true })
+
+    expect(notifySpy.mock.calls.filter(call => call[0]?.id === 'desktop-build-discontinued')).toHaveLength(0)
   })
 })
 

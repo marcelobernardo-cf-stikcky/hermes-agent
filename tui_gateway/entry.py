@@ -270,6 +270,7 @@ def _write_or_exit(payload: dict, reason: str) -> None:
 
 
 def main():
+
     # The stdio/Desktop backend is a process root; inherited shell trees must die with it.
     attach_self_to_kill_on_close_job()
     # stdout is this process's JSON-RPC client channel: peer-less global broadcasts belong on it.

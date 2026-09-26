@@ -179,6 +179,7 @@ def _compute_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]
     repo_dir = repo_dir or _resolve_repo_dir()
     if repo_dir is None:
         return _baked_banner_state()
+
     remote = "upstream" if source_check._git_ok(["remote", "get-url", "upstream"], cwd=repo_dir) else "origin"
     tracking_ref = f"{remote}/main"
     upstream, local = (
@@ -188,6 +189,7 @@ def _compute_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]
     if not upstream or not local:
         # Live-git lookup failed (e.g. shallow clone without the selected remote ref).
         return _baked_banner_state()
+
     ahead = source_check._git_count(["rev-list", "--count", f"{tracking_ref}..HEAD"], cwd=repo_dir) or 0
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 

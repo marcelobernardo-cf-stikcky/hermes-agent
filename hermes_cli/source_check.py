@@ -290,6 +290,7 @@ def _branch_remote(co: _Checkout, selected_branch: str) -> str:
     official_ssh = (co.repository and co.repository.lower() == OFFICIAL_REPOSITORY.lower()
                     and co.origin.lower().startswith(("git@", "ssh://")))
     # The public official repo does not require the user's SSH credentials.
+
     if co.embedded or (official_ssh and selected_branch != "main"):
         return f"https://github.com/{OFFICIAL_REPOSITORY}.git"
     # A fork's origin is its own repository. When the checkout has an explicit upstream remote,
@@ -325,12 +326,14 @@ def _check_branch(result: dict, co: _Checkout, selected_branch: str, *,
     """Compare the checkout with ``selected_branch``'s remote tip, falling back to main if it was deleted."""
     result["branch"] = selected_branch
     remote = _branch_remote(co, selected_branch)
+
     target_repository = OFFICIAL_REPOSITORY if remote == "upstream" else co.repository
     target, missing, failure = _branch_tip(target_repository, selected_branch, co.root, co.git, remote)
     if missing and selected_branch != "main":
         result["branch"] = "main"
         if heal:
             _heal_deleted_branch(*heal)
+
         target, _, failure = _branch_tip(target_repository, "main", co.root, co.git, remote)
     if target is None:
         result.update(error="fetch-failed",
@@ -378,6 +381,7 @@ def check_for_updates(*, install_root: Path | None = None, home: Path | None = N
         result["channel"] = channel
     else:
         result["branch"] = selected_branch
+
     update_remote = _branch_remote(co, selected_branch or "main")
     identity = {"root": str(root), "home": str(home), "head": co.head, "origin": co.origin,
                 "updateRemote": update_remote, "branch": selected_branch,

@@ -30,6 +30,7 @@ import {
   speakText,
   triggerCronJob
 } from './hermes'
+
 import { chatMessageText, toChatMessages } from './lib/chat-messages'
 import { $transcriptTailBySessionId, transcriptTailState } from './store/transcript-tail'
 
@@ -464,6 +465,21 @@ describe('Hermes REST helpers', () => {
     const call = api.mock.calls[0]?.[0] as { path: string; timeoutMs?: number }
     expect(call.path).toBe('/api/status')
     expect(call.timeoutMs).toBeUndefined()
+  })
+
+  it('bounds the live model metadata probe so a dead provider cannot hold the settings page', async () => {
+    api.mockResolvedValue({})
+    api.mockClear()
+
+    await getGlobalModelInfo()
+
+    // /api/model/info resolves the live context window by probing the
+    // configured provider; it carries its own short budget rather than the
+    // 60s startup timeout so Model Settings degrades instead of hanging
+    // when the provider backend is unreachable (#63214).
+    const call = api.mock.calls[0]?.[0] as { path: string; timeoutMs?: number }
+    expect(call.path).toBe('/api/model/info')
+    expect(call.timeoutMs).toBe(5_000)
   })
 
   // Explicit profile/connection writes (deleting a profile) carry the foreground

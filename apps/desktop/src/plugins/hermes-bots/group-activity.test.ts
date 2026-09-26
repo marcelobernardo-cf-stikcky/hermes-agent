@@ -302,6 +302,7 @@ describe('feed shape', () => {
     expect(feed(room, 'Volatile').length).toBeGreaterThan(0)
     expect([...room.gateway.storage.keys()]).not.toContain('group-activity')
   })
+
 })
 
 describe('stale working rows across rounds', () => {

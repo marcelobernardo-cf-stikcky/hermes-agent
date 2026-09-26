@@ -112,6 +112,7 @@ def test_kill_started_since_preserves_preexisting_and_foreign_processes(registry
 
 
 
+
 def test_kill_for_session_only_targets_matching_running_processes(registry):
     mine = _make_session(sid="proc_mine")
     mine.session_key = "session-a"

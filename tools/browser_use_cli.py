@@ -31,6 +31,9 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this named session
 # (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
 _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
+# Internal route provenance: this exec resolved to a browser on the Bot Desktop display and must use
+# the same human-control lease fence as the built-in browser tools. Popped before launching the CLI.
+_BOT_DESKTOP_BROWSER_SENTINEL = "_HERMES_BU_BOT_DESKTOP_BROWSER"
 
 _owned_harness_daemons: set[str] = set()
 
@@ -651,6 +654,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     def dispatch() -> Dict[str, Any]:
         _attach_vault_supervisor(env, task_id)
         try:
+
             return {"proc": _run_cli_killing_process_group(cmd, code, env, remaining)}
         except subprocess.TimeoutExpired:
             return {"error_result": tool_error(
