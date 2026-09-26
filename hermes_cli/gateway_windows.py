@@ -37,10 +37,10 @@ logger = logging.getLogger(__name__)
 # Short timeouts: schtasks occasionally wedges and we don't want to hang forever.
 _SCHTASKS_TIMEOUT_S = 15
 # Patterns in schtasks stderr that mean "fall back to the Startup folder".
-# schtasks' localized "access is denied" (en/es/cs/zh-Hans/zh-Hant/ja/ko): one vocabulary for both
+# schtasks' localized "access is denied" (en/es/pt/cs/zh-Hans/zh-Hant/ja/ko): one vocabulary for both
 # the elevated-install offer and the Startup-folder fallback.
 _ACCESS_DENIED_WORDS = (
-    r"access is denied|acceso denegado|přístup byl odepřen|拒绝访问|拒絕存取|アクセスが拒否されました|"
+    r"access is denied|acceso denegado|acesso negado|přístup byl odepřen|拒绝访问|拒絕存取|アクセスが拒否されました|"
     r"액세스가 거부되었습니다"
 )
 _FALLBACK_PATTERNS = re.compile(
@@ -1703,7 +1703,10 @@ def start() -> None:
         _report_already_running(running_pids)
         return
 
-    if not is_task_registered() and not is_startup_entry_installed():
+    task_installed = is_task_registered()
+    startup_installed = is_startup_entry_installed()
+
+    if not task_installed and not startup_installed:
         # Login persistence is a lasting system change: a bare ``start`` installs it only on an explicit
         # answer — the HERMES_GATEWAY_INSTALL_START_ON_LOGIN override or a real TTY prompt — never on a
         # non-TTY default (#113977). Declining still starts the gateway; the command is ``start``.
@@ -1724,13 +1727,17 @@ def start() -> None:
             install(force=False, start_now=True, start_on_login=True)
             return
         print("ℹ Login auto-start not installed; add it later with: hermes gateway install")
-    elif is_task_registered():
+    elif task_installed:
         reconcile_scheduled_task(get_task_name())   # like systemd's regenerate-on-stale before a start
 
-    # Manual starts use the same console-less direct spawn as restart() and install --start-now;
-    # Scheduled Task / Startup entries are only login persistence.
-    pid = _spawn_detached()
-    _report_gateway_start("direct spawn")
+    # A persistent login mechanism owns the VBS supervisor. Manual starts must
+    # use the same owner so a crash is recovered during the current session too.
+    if task_installed or startup_installed:
+        pid = _spawn_supervised()
+        _report_gateway_start(f"VBS supervisor (PID {pid})")
+    else:
+        pid = _spawn_detached()
+        _report_gateway_start(f"direct spawn (PID {pid})")
 
 
 def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:

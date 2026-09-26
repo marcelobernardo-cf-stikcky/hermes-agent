@@ -70,6 +70,10 @@ def test_exec_schtasks_round_trips_non_ascii_task_argument_live(monkeypatch):
         ["schtasks", "/Create", "/F", "/TN", task, "/SC", "ONLOGON", "/TR", f'wscript.exe //B "C:\\{marker}\\x.vbs"'],
         capture_output=True, timeout=30,
     )
+    if created.returncode != 0:
+        detail = (created.stderr or b"").decode(gateway_windows._schtasks_encoding(), errors="replace")
+        if gateway_windows._is_access_denied(detail):
+            pytest.skip(f"schtasks task creation requires elevation: {detail.strip()}")
     assert created.returncode == 0, created.stderr
     try:
         code, out, _err = gateway_windows._exec_schtasks(["/Query", "/TN", task, "/XML"])
@@ -702,7 +706,7 @@ def test_start_on_tty_hands_both_answers_to_install_and_honours_the_env_opt_out(
 
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_spawn_supervised_launches_hidden_wscript(monkeypatch, tmp_path):
     """The persistent launcher must own the gateway child process lifetime."""
     script_path = tmp_path / "Hermes_Gateway_alice.vbs"
@@ -736,7 +740,7 @@ def test_spawn_supervised_launches_hidden_wscript(monkeypatch, tmp_path):
     assert kwargs["stdout"] is kwargs["stderr"]
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_start_uses_vbs_supervisor_when_login_launcher_exists(monkeypatch):
     """Manual starts must not bypass an installed persistent supervisor."""
     calls = []
