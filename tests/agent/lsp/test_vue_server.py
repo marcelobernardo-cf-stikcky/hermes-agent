@@ -26,8 +26,12 @@ def _stage(tmp_path, monkeypatch, vue_version: str, *, js_sdk: bool):
     launcher.write_text("#!/usr/bin/env node\n", encoding="utf-8")
     launcher.chmod(0o755)
     (tmp_path / "lsp" / "bin").mkdir()
-    staged = tmp_path / "lsp" / "bin" / "vue-language-server"
-    staged.write_text(launcher.read_text(encoding="utf-8"), encoding="utf-8")  # copied like the Windows path, not symlinked
+    if os.name == "nt":  # npm stages a .cmd wrapper on Windows; a POSIX shim is rejected there
+        staged = tmp_path / "lsp" / "bin" / "vue-language-server.cmd"
+        staged.write_text("@echo off\r\n", encoding="utf-8")
+    else:
+        staged = tmp_path / "lsp" / "bin" / "vue-language-server"
+        staged.write_text(launcher.read_text(encoding="utf-8"), encoding="utf-8")  # copied, not symlinked
     staged.chmod(0o755)
     if js_sdk:
         (node_modules / "typescript" / "lib").mkdir(parents=True)
