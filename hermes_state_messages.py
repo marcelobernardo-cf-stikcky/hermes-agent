@@ -796,6 +796,41 @@ class SessionMessagesMixin:
             proved.extend(matches)
         return list(dict.fromkeys(proved))
 
+    def _reserve_display_slots(self, conn, session_id: str,
+                               compacted_messages: List[Dict[str, Any]]) -> Optional[List[Optional[int]]]:
+        """Display orders for the rows ahead of the first carried origin (the new summary), shifting later
+        rows so the summary never sorts after its own tail. ``None`` when nothing is carried."""
+        # Compaction emits a new summary before a carried tail. Tail copies keep durable display origins,
+        # so reserve slots before the earliest carried origin; otherwise the summary is inserted later but
+        # sorts after its own tail on every reload.
+        display_orders: Optional[List[Optional[int]]] = None
+        inherited_orders = []
+        first_inherited_index = None
+        for index, msg in enumerate(compacted_messages):
+            origin_id = msg.get("_row_id")
+            if not isinstance(origin_id, int) or isinstance(origin_id, bool):
+                continue
+            origin = conn.execute(
+                "SELECT COALESCE(display_order, id) FROM messages WHERE id = ? AND session_id = ?",
+                (origin_id, session_id),
+            ).fetchone()
+            if origin is None:
+                continue
+            first_inherited_index = index if first_inherited_index is None else first_inherited_index
+            inherited_orders.append(origin[0])
+        if first_inherited_index:
+            origin_order = min(inherited_orders)
+            conn.execute(
+                "UPDATE messages SET display_order = display_order + ? "
+                "WHERE session_id = ? AND display_order >= ?",
+                (first_inherited_index, session_id, origin_order),
+            )
+            display_orders = [
+                origin_order + index if index < first_inherited_index else None
+                for index in range(len(compacted_messages))
+            ]
+        return display_orders
+
     def _archive_named_rows(
         self, conn, session_id: str, compacted_messages: List[Dict[str, Any]], covered: List[int], *,
         tail_count: int, carried_messages: Optional[List[Dict[str, Any]]], patched_model_config: Any,
@@ -825,7 +860,9 @@ class SessionMessagesMixin:
                 f"WHERE session_id = ? AND id IN ({placeholders})",
                 [session_id, *rewind_ids])
         conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
-        inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
+        inserted, tool_calls_total = self._insert_message_rows(
+            conn, session_id, compacted_messages,
+            display_orders=self._reserve_display_slots(conn, session_id, compacted_messages))
         if unseen:
             _ids, unseen_tool_calls = self._tail_rows_after_watermark(
                 conn,
@@ -909,35 +946,7 @@ class SessionMessagesMixin:
                 conn.execute(f"{_ARCHIVE_ACTIVE_SQL} AND id NOT IN ({placeholders})", [session_id, *rewind_ids])
             else:
                 conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
-            # Compaction emits a new summary before a carried tail. Tail copies keep durable display origins,
-            # so reserve slots before the earliest carried origin; otherwise the summary is inserted later but
-            # sorts after its own tail on every reload.
-            display_orders: Optional[List[Optional[int]]] = None
-            inherited_orders = []
-            first_inherited_index = None
-            for index, msg in enumerate(compacted_messages):
-                origin_id = msg.get("_row_id")
-                if not isinstance(origin_id, int) or isinstance(origin_id, bool):
-                    continue
-                origin = conn.execute(
-                    "SELECT COALESCE(display_order, id) FROM messages WHERE id = ? AND session_id = ?",
-                    (origin_id, session_id),
-                ).fetchone()
-                if origin is None:
-                    continue
-                first_inherited_index = index if first_inherited_index is None else first_inherited_index
-                inherited_orders.append(origin[0])
-            if first_inherited_index:
-                origin_order = min(inherited_orders)
-                conn.execute(
-                    "UPDATE messages SET display_order = display_order + ? "
-                    "WHERE session_id = ? AND display_order >= ?",
-                    (first_inherited_index, session_id, origin_order),
-                )
-                display_orders = [
-                    origin_order + index if index < first_inherited_index else None
-                    for index in range(len(compacted_messages))
-                ]
+            display_orders = self._reserve_display_slots(conn, session_id, compacted_messages)
             inserted, tool_calls_total = self._insert_message_rows(
                 conn, session_id, compacted_messages, display_orders=display_orders)
             if tail_ids:
