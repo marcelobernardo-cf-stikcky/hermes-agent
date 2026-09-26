@@ -144,6 +144,21 @@ function sharesDurableRow(first: ChatMessage[], second: ChatMessage[]): boolean 
   return second.some(message => message.rowId !== undefined && rowIds.has(message.rowId))
 }
 
+/** A live bubble (no stored id) whose every tool call the page already
+ * committed is that page's row, not extra history: carrying it paints those
+ * tools (an open clarify card) twice. */
+function coveredBy(page: ChatMessage[]): (message: ChatMessage) => boolean {
+  const pageToolIds = new Set(
+    page.flatMap(message => message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : [])))
+  )
+
+  return message => {
+    const tools = message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : []))
+
+    return message.rowId === undefined && tools.length > 0 && tools.every(id => pageToolIds.has(id))
+  }
+}
+
 interface StoredRowSlot {
   message: ChatMessage
   /** Rows without a stored id (e.g. a page-local tool fold) that precede this row. */
@@ -153,8 +168,8 @@ interface StoredRowSlot {
 /**
  * Stored-id merge for a page that overlaps the window but does not anchor in
  * front of it. A row with no stored id travels with the next stored row after
- * it, so a page-local fold stays in front of the row it preceded. Rows with no
- * stored id after the last stored row stay at the end (page first, then live).
+ * it, so a page-local fold stays in front of the row it preceded. The page's
+ * rows with no stored id after its last stored row stay at the end.
  */
 function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessage[]): ChatMessage[] {
   // Compaction, rewind, or a different session arrives as new stored ids.
@@ -166,11 +181,17 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
   const refreshedIds = new Set(refreshedTail.map(message => message.id))
   const byRowId = new Map<number, StoredRowSlot>()
 
+  const coveredByPage = coveredBy(refreshedTail)
+
   const place = (messages: ChatMessage[], fresh: boolean): ChatMessage[] => {
     let pending: ChatMessage[] = []
 
     for (const message of messages) {
       if (message.rowId === undefined) {
+        if (!fresh && coveredByPage(message)) {
+          continue
+        }
+
         // The fresh page's copy of an unstored row wins over the window's.
         if (fresh || !refreshedIds.has(message.id)) {
           pending.push(message)
@@ -197,14 +218,20 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
     return pending
   }
 
-  const previousTrailing = place(previous, false)
+  place(previous, false)
   const refreshedTrailing = place(refreshedTail, true)
 
   const stored = [...byRowId.entries()]
     .sort((left, right) => left[0] - right[0])
     .flatMap(([, { leading, message }]) => [...leading, message])
 
-  return [...stored, ...refreshedTrailing, ...previousTrailing]
+  // The window's unstored tail (live stream bubbles) is NOT carried here: every
+  // caller hands this result to a live-turn merge as the authoritative side,
+  // and a live row smuggled into it bypasses that merge's dedupe — the bubble
+  // then paints next to the committed row that already holds it (duplicate
+  // clarify cards). The other branches above already drop it; the live merge
+  // re-attaches whatever the page does not cover.
+  return [...stored, ...refreshedTrailing]
 }
 
 export function graftRefreshedTailOntoBackfill(refreshedTail: ChatMessage[], previous: ChatMessage[]): ChatMessage[] {
@@ -235,7 +262,9 @@ export function graftRefreshedTailOntoBackfill(refreshedTail: ChatMessage[], pre
   }
 
   if (prefixIsEarlier) {
-    return [...previous.slice(0, anchor), ...refreshedTail]
+    const coveredByPage = coveredBy(refreshedTail)
+
+    return [...previous.slice(0, anchor).filter(message => !coveredByPage(message)), ...refreshedTail]
   }
 
   const refreshedIds = new Set(refreshedTail.map(message => message.id))

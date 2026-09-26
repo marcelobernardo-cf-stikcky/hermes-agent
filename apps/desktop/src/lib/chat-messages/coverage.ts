@@ -18,12 +18,22 @@ function sameOccurrencePart(stored: ChatMessagePart, local: ChatMessagePart): bo
  * bubble ordinals and equal text alone cannot establish that coverage. */
 export function withoutCoveredAssistantPrefix(stored: ChatMessage[], local: ChatMessage[]): ChatMessage[] {
   const parts = stored.flatMap(message => (message.role === 'assistant' ? message.parts : []))
+  const storedRowIds = new Set(stored.flatMap(message => (message.rowId === undefined ? [] : [message.rowId])))
   let cursor = 0
   let anchored = false
   let stopped = false
   const remaining: ChatMessage[] = []
 
   for (const message of local) {
+    // A local copy of a stored row IS that row (message ids drift between
+    // loads; rowId does not). It must not consume the coverage its live
+    // bubbles need, or they paint again beside the committed row.
+    if (!stopped && message.rowId !== undefined && storedRowIds.has(message.rowId)) {
+      anchored = true
+
+      continue
+    }
+
     if (stopped || message.role !== 'assistant' || message.error) {
       stopped = true
       remaining.push(message)

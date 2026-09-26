@@ -881,6 +881,22 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
+    if (isPendingAssistant) {
+      // A sealed interim (or text-less) bubble whose every tool call is already
+      // committed is carried by the folded row. Checked before ordinal pairing:
+      // otherwise it replaces the live projection shell and paints those tools
+      // (e.g. an open clarify card) a second time beside the committed row.
+      const toolIds = message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : []))
+
+      if (
+        (message.interim === true || !chatMessageText(message).trim()) &&
+        toolIds.length > 0 &&
+        toolIds.every(id => id && committedToolIds.has(id))
+      ) {
+        continue
+      }
+    }
+
     const ordinalMatch = nextByRoleOrdinal.get(`${message.role}:${ordinal}`)
 
     const authoritative =
@@ -943,21 +959,7 @@ export function preserveLocalPendingTurnMessages(
     //  3. local extends authoritative text -> local is further along; replace
     //     the committed row with the richer body instead of appending
     if (isPendingAssistant) {
-      // A sealed interim (or text-less) bubble whose every tool call is already
-      // committed is carried by the folded row, not appended below newer turns.
       const nextText = textWithoutReferenceLines(chatMessageText(message))
-      const toolIds = message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : []))
-
-      if (
-        // A text-less bubble adds nothing beyond its tool calls, pending or not
-        // (a clarify awaiting input stays pending): if they are committed, the
-        // committed row already paints them; a later delta recreates the bubble.
-        (message.interim === true || !nextText.trim()) &&
-        toolIds.length > 0 &&
-        toolIds.every(id => id && committedToolIds.has(id))
-      ) {
-        continue
-      }
 
       const committedMatch = candidates.find(
         candidate =>
@@ -1001,7 +1003,15 @@ export function preserveLocalPendingTurnMessages(
       continue
     }
 
-    preserved.push(message)
+    // A live bubble that runs past what history committed keeps only the new
+    // tail; its committed tool calls already paint in the folded row.
+    const unseen = isPendingAssistant
+      ? message.parts.filter(
+          part => !(part.type === 'tool-call' && part.toolCallId && committedToolIds.has(part.toolCallId))
+        )
+      : message.parts
+
+    preserved.push(unseen.length === message.parts.length ? message : { ...message, parts: unseen })
   }
 
   const withReplacements =

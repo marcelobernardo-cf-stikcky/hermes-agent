@@ -840,11 +840,6 @@ export function mergeInFlightMessages(
     return { ...noop, caughtUp: true }
   }
 
-  // Row ids are the durable identity; message ids embed a page ordinal and
-  // drift between loads, so a journaled copy of a committed row must be
-  // matched by rowId or it consumes the coverage its live bubbles need.
-  const baseRowIds = new Set(baseMessages.flatMap(message => (message.rowId === undefined ? [] : [message.rowId])))
-  tailAssistants = tailAssistants.filter(message => message.rowId === undefined || !baseRowIds.has(message.rowId))
   tailAssistants = withoutCoveredAssistantPrefix(afterUser.filter(isCommittedRow), tailAssistants)
   lastJournalRow = tailAssistants.findLast(assistantHasRecoverableContent) ?? null
 
