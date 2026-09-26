@@ -34,6 +34,13 @@ export function withoutCoveredAssistantPrefix(stored: ChatMessage[], local: Chat
     let consumed = 0
 
     for (const part of message.parts) {
+      // Durable rows keep reasoning the live bubble may never have streamed;
+      // a reasoning part absent locally is not a divergence. Tool anchoring
+      // below still guards against coincidental text matches.
+      while (parts[cursor]?.type === 'reasoning' && !sameOccurrencePart(parts[cursor], part)) {
+        cursor += 1
+      }
+
       if (!parts[cursor] || !sameOccurrencePart(parts[cursor], part)) {
         break
       }

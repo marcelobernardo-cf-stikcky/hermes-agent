@@ -779,6 +779,7 @@ export function preserveLocalPendingTurnMessages(
   }
 
   const latestAuthoritativeUser = [...remainingNext].reverse().find(message => message.role === 'user')
+
   // Tool call ids are durable turn identity even when history folds several live
   // bubbles into one assistant row whose text differs from each sealed segment.
   const committedToolIds = new Set(
@@ -948,7 +949,10 @@ export function preserveLocalPendingTurnMessages(
       const toolIds = message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : []))
 
       if (
-        (message.interim === true || (message.pending !== true && !nextText.trim())) &&
+        // A text-less bubble adds nothing beyond its tool calls, pending or not
+        // (a clarify awaiting input stays pending): if they are committed, the
+        // committed row already paints them; a later delta recreates the bubble.
+        (message.interim === true || !nextText.trim()) &&
         toolIds.length > 0 &&
         toolIds.every(id => id && committedToolIds.has(id))
       ) {
