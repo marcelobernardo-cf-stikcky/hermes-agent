@@ -40,7 +40,8 @@ if not exist "%UPDATE_SCRIPT%" (
     goto :fail
 )
 echo Sincronizando dependencias e rebuild do Desktop...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%UPDATE_SCRIPT%" -InstallRoot "%INSTALL_ROOT%" -Branch "%LIVE_BRANCH%" -NoUi
+echo O update leva ~10-15 min e o log detalhado so aparece no fim. Uma linha "ainda rodando" a cada 30s prova que nao travou.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%UPDATE_SCRIPT%\"','-InstallRoot','\"%INSTALL_ROOT%\"','-Branch','%LIVE_BRANCH%','-NoUi' -NoNewWindow -PassThru; $null=$p.Handle; $t=Get-Date; while(-not $p.WaitForExit(30000)){ '[{0:HH:mm}] ainda rodando ({1:N0} min) - nao abra o Hermes' -f (Get-Date),((Get-Date)-$t).TotalMinutes }; exit $p.ExitCode"
 set "UPDATE_EXIT=%ERRORLEVEL%"
 
 echo.
