@@ -419,6 +419,17 @@ _ENDPOINT_UNREACHABLE_MARKERS = (
 _GATEWAY_ENDPOINT_UNREACHABLE_RE = re.compile(
     "(" + "|".join(_ENDPOINT_UNREACHABLE_MARKERS) + ")", re.IGNORECASE)
 
+def _venv_matches_running_python(venv_dir: Path) -> bool:
+    """False when ``pyvenv.cfg`` pins another Python minor: its compiled wheels (pydantic_core
+    ``.cp311.pyd``) cannot load here and shadow the interpreter's own packages. Unreadable -> True."""
+    try:
+        cfg = (venv_dir / "pyvenv.cfg").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    match = re.search(r"^\s*version(?:_info)?\s*=\s*(\d+)\.(\d+)", cfg, re.MULTILINE)
+    return match is None or (int(match[1]), int(match[2])) == sys.version_info[:2]
+
+
 def _ensure_windows_gateway_venv_imports() -> None:
     """Make detached Windows gateway runs see the Hermes venv packages.
 
@@ -444,7 +455,7 @@ def _ensure_windows_gateway_venv_imports() -> None:
         seen.add(venv_key)
 
         site_packages = resolved_venv / "Lib" / "site-packages"
-        if not site_packages.exists():
+        if not site_packages.exists() or not _venv_matches_running_python(resolved_venv):
             continue
 
         project_entry = str(project_root)
