@@ -151,15 +151,14 @@ describe('rehydrateLiveSessionStatuses — seeding a turn the renderer never saw
     expect($workingSessionIds.get()).not.toContain('stored-old')
   })
 
-  it('leaves a starting session idle — the agent build is not proof of a turn', () => {
-    // `starting` = `agent_build_started` without `agent_ready`. _start_agent_build
-    // runs on the first prompt OR any incidental RPC that needs the agent, so it
-    // is not proof of a turn — lighting the spinner here would fire on merely
-    // opening a session. A real turn arrives as `working`.
+  it('lights a starting session — local fork shows the API wake during preflight (558a430fcc)', () => {
+    // Upstream leaves `starting` idle (an incidental RPC can build the agent). This fork
+    // deliberately shows the spinner while a cold API wakes, so a slow preflight never
+    // looks like a dead send.
     rehydrateLiveSessionStatuses({
       sessions: [{ id: 'runtime-boot', session_key: 'stored-boot', status: 'starting' }]
     })
 
-    expect($workingSessionIds.get()).not.toContain('stored-boot')
+    expect($workingSessionIds.get()).toContain('stored-boot')
   })
 })
