@@ -35,6 +35,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import run_agent
+from run_agent import AIAgent
+
 
 
 # ── pure-function resolver ────────────────────────────────────────────────
@@ -165,3 +168,20 @@ def test_explicit_provider_stale_timeout_wins_over_context_tier_and_reasoning_fl
 
     _write_config(tmp_path, "")
     assert _derive_stream_stale_timeout(agent, api_kwargs) == 600.0
+
+
+def test_process_provider_ignores_implicit_reasoning_floor_for_stale_watchdog(monkeypatch, tmp_path):
+    """Subscription process providers must not inherit the 240s cloud reasoning floor."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+    _write_config(tmp_path, "")
+    monkeypatch.setattr(run_agent, "get_provider_stale_timeout", lambda *a, **k: None)
+
+    agent = object.__new__(AIAgent)
+    agent.provider = "claude-subscription-directsdk-experimental"
+    agent.model = "claude-opus-5-5[1m]"
+    agent.base_url = "process://claude-subscription-directsdk-experimental"
+    agent._base_url = agent.base_url
+    agent.api_mode = "chat_completions"
+
+    assert agent._compute_non_stream_stale_timeout({"messages": [{"role": "user", "content": "x"}]}) == float("inf")

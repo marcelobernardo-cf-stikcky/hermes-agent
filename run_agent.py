@@ -594,13 +594,17 @@ class AIAgent(
         list), scaled by estimated context size and capped by the run budget."""
         stale_base, uses_implicit_default = self._resolved_api_call_stale_timeout_base()
         base_url = getattr(self, "_base_url", None) or self.base_url or ""
+        explicit = self._stale_timeout_is_explicit()
+        # ``process://`` providers are local transports; a cloud reasoning floor must not kill a
+        # valid long prefill. An explicit stale timeout remains authoritative.
+        if base_url and base_url.lower().startswith("process://") and not explicit:
+            return float("inf")
         if uses_implicit_default and base_url and is_local_endpoint(base_url):
             return float("inf")
 
         from agent.chat_completion_helpers import _high_effort_silence_floor, cap_to_run_budget, estimate_request_context_tokens
         est_tokens = estimate_request_context_tokens(api_payload)
         timeout = max(stale_base, 240.0) if est_tokens > 100_000 else max(stale_base, 150.0) if est_tokens > 50_000 else stale_base
-        explicit = self._stale_timeout_is_explicit()
         # High-effort Codex reasoning (#112909) floors the IMPLICIT stale timeout before the run-budget
         # cap below, so the floor can never outlive the run budget.
         if self.api_mode == "codex_responses" and not explicit:
