@@ -2947,6 +2947,11 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # `--cli` is the highest-precedence TUI override; dropping HERMES_TUI covers
     # older hermes builds on PATH that predate the flag's precedence.
     env.pop("HERMES_TUI", None)
+    # The worker IS Hermes: the sanitizer above stripped this checkout from PYTHONPATH, so a
+    # dispatcher running on a bare interpreter + PYTHONPATH (Windows VBS supervisor) spawned
+    # workers that died with "No module named 'hermes_cli'". Same pin as the cron worker.
+    from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
+    env = pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parent.parent)
 
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
     # A worker spawned by a managed systemd gateway must leave the gateway's

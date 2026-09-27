@@ -79,3 +79,27 @@ def test_terminal_cwd_pinned_to_workspace(monkeypatch, tmp_path):
     assert captured["env"]["HERMES_KANBAN_WORKSPACE"] == str(workspace)
 
 
+def test_worker_pythonpath_pins_hermes_checkout(monkeypatch, tmp_path):
+    """The sanitizer strips this checkout from PYTHONPATH; a dispatcher on a bare
+    interpreter (Windows VBS supervisor) then spawned workers dying with
+    "No module named 'hermes_cli'". The worker env must carry the checkout back."""
+    import os
+    from pathlib import Path
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    root = tmp_path / ".hermes"
+    (root / "profiles" / "w").mkdir(parents=True)
+    (root / "profiles" / "w" / "config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    root.joinpath("config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    checkout = str(Path(kbd.__file__).resolve().parent.parent)
+    monkeypatch.setenv("PYTHONPATH", checkout)
+
+    from hermes_cli import kanban_db as kb
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    captured = _capture_spawn_env(kb, monkeypatch, str(workspace))
+
+    assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == checkout
+
