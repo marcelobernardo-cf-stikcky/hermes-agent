@@ -81,6 +81,31 @@ def test_entitlement_400_benches_only_that_model_and_rotates(pool):
     assert pool.reset_statuses() >= 1 and not pool.entries()[0].model_cooldowns
 
 
+def test_quota_rotation_ignores_other_models_cooldown(pool):
+    from agent.credential_pool import model_cooldown_until
+
+    first, second = pool.entries()
+    pool._adopt(second, model_cooldowns={OTHER_MODEL: time.time() + 3600})
+    assert model_cooldown_until(pool.entries()[1], MODEL) is None
+    assert pool.select(model=MODEL).id == first.id
+
+    next_entry = pool.mark_exhausted_and_rotate(
+        status_code=429, credential_id=first.id, api_key_hint=TOKENS[0],
+        failure_reason="rate_limit", model=MODEL,
+    )
+    assert next_entry is not None and next_entry.id == second.id
+
+
+def test_unmatched_rotation_ignores_other_models_cooldown(pool):
+    second = pool.entries()[1]
+    pool._adopt(second, model_cooldowns={OTHER_MODEL: time.time() + 3600})
+
+    next_entry = pool.mark_exhausted_and_rotate(
+        status_code=401, credential_id="unknown", api_key_hint="not-in-pool", model=MODEL,
+    )
+    assert next_entry is not None and next_entry.id == "cred-0"
+
+
 def test_all_entries_rejecting_falls_back_to_session_marker(pool):
     from agent.fallback_cooldown import _is_entitlement_rejected, _mark_entitlement_rejected_model
 
