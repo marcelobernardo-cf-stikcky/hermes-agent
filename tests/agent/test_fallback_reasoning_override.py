@@ -41,6 +41,18 @@ class TestFallbackReasoningOverride:
         # The key point: fallback result differs from primary
         assert fb_result["effort"] != primary_result["effort"]
 
+    def test_explicit_session_reasoning_survives_fallback(self):
+        """An explicit session choice remains authoritative after a model switch."""
+        from agent.chat_completion_helpers import _reresolve_fallback_reasoning_config
+
+        agent = MagicMock()
+        agent.model = "claude-opus-5-5"
+        agent._session_reasoning_config_override = {"enabled": True, "effort": "xhigh"}
+
+        _reresolve_fallback_reasoning_config(agent)
+
+        assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+
     def test_fallback_to_model_without_override_uses_global(self):
         """Fallback to a model with no override should resolve to None (→ global)."""
         from hermes_constants import resolve_per_model_reasoning_effort

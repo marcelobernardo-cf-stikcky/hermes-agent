@@ -2040,8 +2040,12 @@ def _update_fallback_context_compressor(agent) -> None:
 
 
 def _reresolve_fallback_reasoning_config(agent) -> None:
-    """Per-model override > global reasoning_effort (YAML False = disabled); a config load
-    failure keeps the current reasoning_config rather than killing the swap."""
+    """Keep an explicit session effort; otherwise resolve per-model > global config."""
+    session_override = getattr(agent, "_session_reasoning_config_override", None)
+    if session_override is not None:
+        agent.reasoning_config = dict(session_override)
+        logger.info("Fallback %s: preserving session reasoning override: %s", agent.model, agent.reasoning_config)
+        return
     try:
         # Re-resolve reasoning_config for the new fallback model (Closes #21256). Wrapped in try/except
         # because a config load failure must not kill the swap.

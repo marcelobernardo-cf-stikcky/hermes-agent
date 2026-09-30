@@ -1164,6 +1164,11 @@ class TurnRunner:
                     cache[ctx.session_key] = (agent, sig, msg_count, ctx.session_id)
                     runner._enforce_agent_cache_cap()
             logger.debug("Created new agent for session %s (sig=%s)", ctx.session_key, sig)
+        state = runner._peek_session_state(ctx.session_key) if ctx.session_key else None
+        session_override = state.conversation.reasoning_override if state is not None else None
+        setattr(agent, "_session_reasoning_config_override", (
+            dict(session_override) if session_override is not None else None
+        ))
         return agent, found.reused
 
     # ── per-turn agent wiring ───────────────────────────────────────────────────────────────
