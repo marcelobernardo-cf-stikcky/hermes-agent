@@ -15,6 +15,7 @@
  * drift on the next page.
  */
 
+import { transcriptRowIds } from '@/app/session/hooks/use-session-actions/pending-turn-identity'
 import { getOlderSessionMessages, type ProfileScope } from '@/hermes'
 import { type ChatMessage, toChatMessages } from '@/lib/chat-messages'
 import {
@@ -180,13 +181,35 @@ function mergeOverlappingTail(previous: ChatMessage[], refreshedTail: ChatMessag
 
   const refreshedIds = new Set(refreshedTail.map(message => message.id))
   const byRowId = new Map<number, StoredRowSlot>()
+  // A folded page row is keyed by its turn's FIRST row but also carries its
+  // source rows; a settled live bubble is keyed by the turn's FINAL row. Same
+  // turn: slot the window copy under the page row's key so the page replaces
+  // it instead of sorting both in (#reply painted twice, out of order).
+  const pageSlotOf = new Map<number, number>()
+
+  for (const message of refreshedTail) {
+    if (message.rowId !== undefined) {
+      for (const id of transcriptRowIds(message)) {
+        pageSlotOf.set(id, message.rowId)
+      }
+    }
+  }
 
   const coveredByPage = coveredBy(refreshedTail)
 
   const place = (messages: ChatMessage[], fresh: boolean): ChatMessage[] => {
     let pending: ChatMessage[] = []
 
-    for (const message of messages) {
+    for (const original of messages) {
+      const slot =
+        fresh || original.rowId === undefined
+          ? original.rowId
+          : (transcriptRowIds(original)
+              .map(id => pageSlotOf.get(id))
+              .find(id => id !== undefined) ?? original.rowId)
+
+      const message = slot === original.rowId ? original : { ...original, rowId: slot }
+
       if (message.rowId === undefined) {
         if (!fresh && coveredByPage(message)) {
           continue
