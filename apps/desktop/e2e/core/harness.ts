@@ -47,6 +47,12 @@ export function createCoreSandbox(label: string): CoreSandbox {
   const userDataDir = path.join(root, 'user-data')
   fs.mkdirSync(hermesHome, { recursive: true })
   fs.mkdirSync(userDataDir, { recursive: true })
+
+  if (process.platform === 'win32') {
+    fs.mkdirSync(path.join(home, 'AppData', 'Local'), { recursive: true })
+    fs.mkdirSync(path.join(home, 'AppData', 'Roaming'), { recursive: true })
+  }
+
   fs.writeFileSync(
     path.join(userDataDir, 'window-state.json'),
     JSON.stringify({ x: 0, y: 0, width: 1280, height: 860, isMaximized: false })
@@ -140,6 +146,16 @@ export function coreAppEnv(sandbox: CoreSandbox, extra: Record<string, string> =
     ...env,
     PATH: `${sandbox.bin}${path.delimiter}${env.PATH ?? ''}`,
     HOME: sandbox.home,
+    // Windows anchors the profile root at %LOCALAPPDATA%\hermes, not HOME:
+    // without these the sandbox backend multiplexes (and stops) the real
+    // install's profiles and gateway.
+    ...(process.platform === 'win32'
+      ? {
+          USERPROFILE: sandbox.home,
+          LOCALAPPDATA: path.join(sandbox.home, 'AppData', 'Local'),
+          APPDATA: path.join(sandbox.home, 'AppData', 'Roaming')
+        }
+      : {}),
     HERMES_HOME: sandbox.hermesHome,
     HERMES_DESKTOP_USER_DATA_DIR: sandbox.userDataDir,
     HERMES_DESKTOP_IGNORE_EXISTING: '1',
