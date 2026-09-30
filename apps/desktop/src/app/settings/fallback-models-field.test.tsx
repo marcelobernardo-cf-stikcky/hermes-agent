@@ -12,7 +12,7 @@ beforeAll(() => {
 const getGlobalModelOptions = vi.fn()
 
 vi.mock('@/hermes', () => ({
-  getGlobalModelOptions: () => getGlobalModelOptions()
+  getGlobalModelOptions: (...args: unknown[]) => getGlobalModelOptions(...args)
 }))
 
 // Load once at module scope so no test's 15s budget pays the heavy transform
@@ -34,12 +34,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function renderField(value: unknown, onChange = vi.fn()) {
+function renderField(value: unknown, onChange = vi.fn(), profile?: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
   render(
     <QueryClientProvider client={client}>
-      <FallbackModelsField onChange={onChange} value={value} />
+      <FallbackModelsField onChange={onChange} profile={profile} value={value} />
     </QueryClientProvider>
   )
 
@@ -78,6 +78,12 @@ describe('FallbackModelsField', () => {
     expect(screen.getByText('Add fallback')).toBeTruthy()
     expect(screen.queryByText(/\[object Object\]/)).toBeNull()
     await waitFor(() => expect(getGlobalModelOptions).toHaveBeenCalled())
+  })
+
+  it('loads the catalog and caches it for the profile being edited', async () => {
+    await renderField([], vi.fn(), 'rigger')
+
+    await waitFor(() => expect(getGlobalModelOptions).toHaveBeenCalledWith(undefined, 'rigger'))
   })
 
   it('removing a row emits the remaining entries with their routing keys intact', async () => {

@@ -30,11 +30,13 @@ export function ConfigField({
   enumOptions,
   optionLabels,
   onChange,
-  descriptionExtra
+  descriptionExtra,
+  scopeProfile
 }: {
   schemaKey: string
   schema: ConfigFieldSchema
   value: unknown
+  scopeProfile?: string
   enumOptions?: string[]
   optionLabels?: Record<string, string>
   onChange: (value: unknown) => void
@@ -102,7 +104,7 @@ export function ConfigField({
   // `list` branch below would stringify them to "[object Object]". Render the
   // dedicated structured editor instead.
   if (schemaKey === 'fallback_providers') {
-    return wideRow(<FallbackModelsField onChange={onChange} value={value} />)
+    return wideRow(<FallbackModelsField onChange={onChange} profile={scopeProfile} value={value} />)
   }
 
   if (schema.type === 'boolean') {

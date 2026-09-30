@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { getGlobalModelOptions } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { Plus, X } from '@/lib/icons'
+import { modelOptionsQueryKey } from '@/lib/model-options'
 import { cn } from '@/lib/utils'
 import { $customModels, withCustomModels } from '@/store/custom-models'
 
@@ -71,17 +72,19 @@ function entriesEqual(a: FallbackEntry[], b: FallbackEntry[]): boolean {
  */
 export function FallbackModelsField({
   value,
-  onChange
+  onChange,
+  profile
 }: {
   value: unknown
   onChange: (next: FallbackEntry[]) => void
+  profile?: string
 }) {
   const { t } = useI18n()
   const m = t.settings.model
 
   const modelOptions = useQuery({
-    queryKey: ['model-options', 'global'],
-    queryFn: () => getGlobalModelOptions()
+    queryKey: profile ? modelOptionsQueryKey(profile) : ['model-options', 'global'],
+    queryFn: () => getGlobalModelOptions(undefined, profile)
   })
 
   const customModels = useStore($customModels)
