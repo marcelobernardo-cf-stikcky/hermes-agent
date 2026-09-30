@@ -49,6 +49,26 @@ def test_relay_base_url_is_probed_for_configured_provider(monkeypatch):
     assert profile.calls == [(None, "http://127.0.0.1:9001/deepseek/v1")]
 
 
+def test_codex_uses_credential_bound_catalog_when_configured_host_matches(monkeypatch):
+    relay = "https://chatgpt.com/backend-api/codex"
+    monkeypatch.setattr(
+        models,
+        "_get_model_config_dict",
+        lambda: {"provider": "openai-codex", "base_url": relay},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_codex_runtime_credentials",
+        lambda **_kwargs: {"api_key": "test-token", "base_url": relay},
+    )
+    monkeypatch.setattr(
+        models,
+        "_PROVIDER_CATALOG_FETCHERS",
+        {"openai-codex": lambda _slug, _refresh: ["gpt-6.1-sol"]},
+    )
+
+    assert models.provider_model_ids("openai-codex", force_refresh=True) == ["gpt-6.1-sol"]
+
+
 def test_base_url_for_a_different_provider_is_ignored(monkeypatch):
     monkeypatch.setattr(
         models,

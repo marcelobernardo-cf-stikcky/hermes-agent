@@ -1652,7 +1652,7 @@ def _relay_model_catalog(normalized: str, relay: str) -> Optional[list[str]]:
 # "no vendor egress when a relay is configured" invariant, so intercepting them would only
 # override correct, better-merged behaviour. Everything else is vendor-pinned (#121387).
 _RELAY_AWARE_CATALOG_FETCHERS = frozenset(
-    {"anthropic", "custom", "openai", "openai-api", "stepfun", "gmi"}
+    {"anthropic", "custom", "openai", "openai-api", "openai-codex", "stepfun", "gmi"}
 )
 
 
