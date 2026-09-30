@@ -10,6 +10,7 @@ Models" action) is allowed to block on probes.
 import threading
 import time
 
+import hermes_cli.inventory as inventory
 import hermes_cli.models as models_mod
 from hermes_cli.inventory import build_model_options_payload, load_picker_context
 
@@ -52,6 +53,31 @@ def _drain_background_warms(timeout=10.0) -> None:
 
 def _row(payload, slug):
     return next((row for row in payload["providers"] if row["slug"] == slug), None)
+
+
+def test_model_options_uses_picker_auth_rules(monkeypatch):
+    """The Desktop model selector must keep rate-limited provider catalogs selectable."""
+    forwarded: dict = {}
+
+    def capture(_ctx, **kwargs):
+        forwarded.update(kwargs)
+        return {"providers": [], "model": "gpt-6-luna", "provider": "openai-codex"}
+
+    monkeypatch.setattr(inventory, "build_models_payload", capture)
+    monkeypatch.setattr(inventory, "_moa_provider_row", lambda *_args: None)
+    monkeypatch.setattr(inventory, "_prewarm_pricing_async", lambda *_args, **_kwargs: None)
+
+    inventory.build_model_options_payload(
+        inventory.ConfigContext(
+            current_provider="openai-codex",
+            current_model="gpt-6-luna",
+            current_base_url="",
+            user_providers={},
+            custom_providers=[],
+        )
+    )
+
+    assert forwarded["for_picker"] is True
 
 
 def test_degraded_provider_cannot_stall_the_open(monkeypatch, tmp_path):

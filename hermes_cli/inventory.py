@@ -235,6 +235,7 @@ def build_model_options_payload(
         picker_hints=True, canonical_order=True, pricing=True, pricing_cache_only=not refresh,
         capabilities=True, featured=True,
         refresh=refresh, probe_custom_providers=refresh, probe_current_custom_provider=not refresh,
+        for_picker=True,
         non_blocking_catalogs=not refresh,
     )
     if not refresh:
