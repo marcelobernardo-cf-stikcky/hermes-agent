@@ -185,6 +185,35 @@ class TestDisplayProjectionParity:
             "target original", "new event",
         ]
 
+    def test_carried_user_row_keeps_its_durable_content(self, db):
+        """A carried user row must stay as the user wrote it. The live dict can hold the model-only
+        image hint (``[The user attached an image: ...]``) instead of the persisted ``@image:`` form;
+        copying that over made the reloaded bubble lose its image and differ from the turn it belongs to."""
+        sid = "carried-user-durable"
+        db.create_session(sid, source="desktop")
+        clean = "olha isso\n@image:C:/a.png"
+        hint = "[The user attached an image: a.png]\n[Examine it with the vision_analyze tool using image_url: C:/a.png]\n\nolha isso"
+        db.append_messages_batch(sid, [
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": clean},
+            {"role": "assistant", "content": "vendo"},
+        ])
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        live_user = {**history[2], "content": hint + "\n\nMODE BLOCK injected for the model"}  # the model's view
+        db.archive_and_compact(sid, [
+            {"role": "user", "content": "[CONTEXT COMPACTION] summary", "_compressed_summary": True},
+            live_user, history[3],
+        ])
+        shown = [m for m in db.get_messages(sid, include_compacted=True) if m["role"] == "user" and "olha" in m["content"]]
+        assert [m["content"] for m in shown] == [clean]
+        conv = db.get_messages_as_conversation(sid)
+        assert [m["content"] for m in conv if m["role"] == "user" and "olha" in str(m["content"])] == [clean]
+        # The model keeps what it was sent.
+        row = db._conn.execute("SELECT api_content FROM messages WHERE session_id = ? AND active = 1 AND role = 'user' "
+                               "AND content = ?", (sid, clean)).fetchone()
+        assert row[0] == hint + "\n\nMODE BLOCK injected for the model"
+
     def test_fresh_row_inside_carried_tail_keeps_its_position(self, db):
         """A row compaction creates BETWEEN carried tail rows (verify nudge, model-switch note,
         merged summary carrier) must render at that position, not after the whole tail.

@@ -22,6 +22,21 @@ from hermes_state_common import (
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
+# tui_gateway.session_history._build_image_ref_message's model-only prefix, one block per attached image.
+_IMAGE_HINT_RE = re.compile(r"\[The user attached an image: [^\]\n]*\]\n\[Examine it with the vision_analyze tool using "
+                            r"image_url: ([^\n]*)\](?:\n\n|$)")
+
+
+def _is_image_hint_view(live: Any, durable: Any) -> bool:
+    """Is *live* the model view of the durable ``@image:`` row *durable*: image_url hints, then the user's
+    exact words, then optionally the turn's injected context (mode blocks, notes)? A merge or supersede
+    changes the user's words themselves and is never matched."""
+    if not (isinstance(live, str) and isinstance(durable, str)) or not _IMAGE_HINT_RE.match(live):
+        return False
+    words = _IMAGE_HINT_RE.sub("", live).strip()
+    durable_words = "\n".join(line for line in durable.split("\n") if not line.startswith("@image:")).strip()
+    return "@image:" in durable and (words == durable_words or words.startswith(durable_words + "\n\n"))
+
 # One INSERT shape for every message writer (append, batch, replace, compact, import).
 _INSERT_MESSAGE_SQL = """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
@@ -534,8 +549,19 @@ class SessionMessagesMixin:
                     "WHERE id = ? AND session_id = ?",
                     (origin_row_id, session_id),
                 ).fetchone()
+            row_msg = msg
+            if (origin_display is not None and role == "user" and origin_display["role"] == "user"
+                    and not msg.get("_compressed_summary")
+                    and _is_image_hint_view(msg.get("content"), self._decode_content(origin_display["content"]))):
+                # The live dict holds the model's view of the turn (image_url hint) while the durable row holds
+                # what the user wrote (``@image:``). Same display event: keep the durable text, store the live
+                # bytes as the replay sidecar so the model still sees what it was sent. Intentional rewrites
+                # (merged queued messages, supersede markers) change the words and are left alone.
+                row_msg = {**msg, "content": self._decode_content(origin_display["content"]),
+                           "api_content": msg.get("api_content") if msg.get("api_content") is not None
+                           else msg.get("content")}
             cur = conn.execute(_INSERT_MESSAGE_SQL, self._message_row_params(
-                session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
+                session_id, role, row_msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
             # Keep the caller's live row aligned with the durable identity. Rows created without an explicit
             # timestamp (notably mid-turn steers) may be carried through several compaction generations; if
             # the generated timestamp exists only in SQLite, every copy receives a new identity and renders
