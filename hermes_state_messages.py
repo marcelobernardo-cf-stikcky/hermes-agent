@@ -45,6 +45,22 @@ def _with_origin_tool_content(row: Any, origin_content: Any) -> Any:
         return row
     return {**dict(row), "content": origin_content}
 
+
+def _restore_origin_tool_contents(conn: Any, session_ids: List[str], rows: List[Any]) -> List[Any]:
+    """*rows* with each tool result swapped for the first content written under its tool_call_id within
+    *session_ids*. Read unfiltered by visibility: the original can sit hidden (active=0, compacted=0) behind
+    the pruned copy the projection chose. One batched lookup per call, never one per row."""
+    wanted = sorted({row["tool_call_id"] for row in rows if row["role"] == "tool" and row["tool_call_id"]})
+    originals: Dict[str, Any] = {}
+    for start in range(0, len(wanted), 800):  # stay under SQLite's bound-variable ceiling with session_ids
+        chunk = wanted[start:start + 800]
+        for tool_call_id, content in conn.execute(
+                f"SELECT tool_call_id, content FROM messages WHERE session_id IN ({_placeholders(session_ids)}) "
+                f"AND role = 'tool' AND tool_call_id IN ({_placeholders(chunk)}) ORDER BY id",
+                (*session_ids, *chunk)):
+            originals.setdefault(tool_call_id, content)
+    return [_with_origin_tool_content(row, originals.get(row["tool_call_id"])) for row in rows]
+
 # One INSERT shape for every message writer (append, batch, replace, compact, import).
 _INSERT_MESSAGE_SQL = """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
@@ -1111,13 +1127,12 @@ class SessionMessagesMixin:
         """Fixed-width durable identity for indexed display-generation lookup."""
         return hashlib.sha256(repr(key).encode("utf-8", "surrogatepass")).digest()
 
-    def _dedupe_display_generations(self, rows):
+    def _dedupe_display_generations(self, rows, session_ids: List[str]):
         """Collapse compaction generations so each logical message appears once (the protected tail is copied
         into each generation: same role/content/timestamp, different ``active``/id); prefer the live row, then
         the newest. The ONE definition every display projection shares. *rows* must be ordered by ``id``."""
         seen: Dict[Any, Any] = {}
         first_order: Dict[Any, int] = {}
-        origin_tool_content: Dict[Any, Any] = {}
         for row in rows:
             if self._is_model_only_row(row):
                 continue
@@ -1128,15 +1143,12 @@ class SessionMessagesMixin:
             cur = seen.get(key)
             if cur is None or (row["active"], row["id"]) > (cur["active"], cur["id"]):
                 seen[key] = row
-            if row["role"] == "tool":
-                # ponytail: sees only the rows the caller fetched; an original hidden as active=0/compacted=0
-                # stays pruned on this (gateway warm) path. The REST page path looks it up unfiltered.
-                origin_tool_content.setdefault(key, row["content"])  # rows arrive id-ordered: first = original
             order = row["display_order"] if isinstance(row["display_order"], int) else row["id"]
             first_order[key] = min(first_order.get(key, order), order)
         # Order by the event's durable origin, not the chosen representative's fresh row id.
-        return [_with_origin_tool_content(seen[key], origin_tool_content.get(key))
-                for key in sorted(seen, key=first_order.__getitem__)]
+        chosen = [seen[key] for key in sorted(seen, key=first_order.__getitem__)]
+        with self._read_ctx() as conn:
+            return _restore_origin_tool_contents(conn, session_ids, chosen)
 
     def _ensure_display_order(self, session_id: str) -> bool:
         """Backfill one legacy session once, preserving the pre-index display identity exactly."""
@@ -1266,15 +1278,7 @@ class SessionMessagesMixin:
                    GROUP BY display_order ORDER BY display_order {direction}
                    LIMIT ? OFFSET ?
                )
-               SELECT chosen.*, (
-                   -- No visibility filter: the original may sit hidden (active=0, compacted=0) behind its copy,
-                   -- and the representative is already chosen; this only restores what that tool call returned.
-                   SELECT origin.content FROM messages AS origin
-                   WHERE chosen.role = 'tool' AND origin.session_id = chosen.session_id
-                     AND origin.display_order = chosen.display_order AND origin.role = 'tool'
-                     AND origin.tool_call_id IS chosen.tool_call_id
-                   ORDER BY origin.id LIMIT 1
-               ) AS _origin_tool_content FROM page
+               SELECT chosen.* FROM page
                JOIN messages AS chosen ON chosen.id = (
                    SELECT candidate.id FROM messages AS candidate
                    WHERE candidate.session_id = ?
@@ -1285,8 +1289,7 @@ class SessionMessagesMixin:
                ORDER BY page.display_order ASC""",
             (session_id, -1 if limit is None else limit, offset, session_id),
         ).fetchall()
-        return [_with_origin_tool_content({k: row[k] for k in row.keys() if k != "_origin_tool_content"},
-                                          row["_origin_tool_content"]) for row in rows]
+        return _restore_origin_tool_contents(conn, [session_id], rows)
 
     def _display_messages_from_conn(self, conn, session_id: str) -> Optional[List[Dict[str, Any]]]:
         """Exact display snapshot on an already-held transaction; None means fail closed."""
@@ -1432,11 +1435,11 @@ class SessionMessagesMixin:
         repairs the loaded list for LIVE REPLAY callers (a durable ``user;user`` pair would re-trigger the
         per-request repair forever), preserving summary markers before repair so derivative context
         cannot merge with an original user turn; the stored transcript is never mutated."""
+        session_ids = self._resume_lineage_ids(session_id) if include_ancestors else [session_id]
         rows = self._fetch_conversation_rows(
-            self._resume_lineage_ids(session_id) if include_ancestors else [session_id],
-            self._active_clause(include_inactive, include_compacted), with_session_id=False)
+            session_ids, self._active_clause(include_inactive, include_compacted), with_session_id=False)
         if include_compacted:
-            rows = self._dedupe_display_generations(rows)
+            rows = self._dedupe_display_generations(rows, session_ids)
         return self._rows_to_conversation(rows, session_id=session_id, include_ancestors=include_ancestors,
             repair_alternation=repair_alternation, include_row_ids=include_row_ids,
             include_summary_markers=repair_alternation)
@@ -1536,14 +1539,14 @@ class SessionMessagesMixin:
         read as deleted even though every row is still on disk, and the REST transcript read (which has
         always included them) disagreed with this one about the same session (#92080).
         """
-        rows = self._fetch_conversation_rows(
-            self._resume_lineage_ids(session_id), _DISPLAY_ACTIVE_CLAUSE, with_session_id=True)
+        lineage = self._resume_lineage_ids(session_id)
+        rows = self._fetch_conversation_rows(lineage, _DISPLAY_ACTIVE_CLAUSE, with_session_id=True)
         # The model projection stays active-only: it is the compressed working context.
         model_history = self._rows_to_conversation(
             [r for r in rows if r["session_id"] == session_id and r["active"]], session_id=session_id,
             include_ancestors=False, repair_alternation=True, include_row_ids=True, include_summary_markers=True)
         display_history = self._rows_to_conversation(
-            self._dedupe_display_generations(rows), session_id=session_id,
+            self._dedupe_display_generations(rows, lineage), session_id=session_id,
             include_ancestors=True, repair_alternation=False, include_row_ids=True)
         return model_history, display_history
 
@@ -1593,7 +1596,7 @@ class SessionMessagesMixin:
         if len(session_ids) <= 1:
             return []
         rows = self._dedupe_display_generations(
-            self._fetch_conversation_rows(session_ids, _DISPLAY_ACTIVE_CLAUSE, with_session_id=True))
+            self._fetch_conversation_rows(session_ids, _DISPLAY_ACTIVE_CLAUSE, with_session_id=True), session_ids)
         ancestor_ids = {int(row["id"]) for row in rows if row["session_id"] != session_id and row["id"] is not None}
         if not ancestor_ids:
             return []

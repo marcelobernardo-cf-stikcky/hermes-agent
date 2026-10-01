@@ -126,8 +126,10 @@ class TestDisplayProjectionParity:
         assert tool(db.get_messages(sid, include_compacted=True)) == [original]
         assert tool(db.get_messages(sid, include_compacted=True, latest=True, limit=120)) == [original]
         assert tool(db.get_messages_as_conversation(sid, include_row_ids=True, include_compacted=True)) == [original]
+        assert tool(db.get_resume_conversations(sid)[1]) == [original]  # Desktop resume / reconnect
         # The model keeps the pruned view: that is the whole point of the prune.
         assert tool(db.get_messages_as_conversation(sid)) == ['[clarify] user responded: ["yes"]']
+        assert tool(db.get_resume_conversations(sid)[0]) == ['[clarify] user responded: ["yes"]']
 
     def test_unrelated_row_edit_keeps_inherited_identity_of_pruned_copies(self, db):
         """Any identity-invalidating UPDATE (the turn prologue rewrites its user row every turn) triggers
