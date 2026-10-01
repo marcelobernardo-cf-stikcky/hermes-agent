@@ -798,37 +798,55 @@ class SessionMessagesMixin:
 
     def _reserve_display_slots(self, conn, session_id: str,
                                compacted_messages: List[Dict[str, Any]]) -> Optional[List[Optional[int]]]:
-        """Display orders for the rows ahead of the first carried origin (the new summary), shifting later
-        rows so the summary never sorts after its own tail. ``None`` when nothing is carried."""
-        # Compaction emits a new summary before a carried tail. Tail copies keep durable display origins,
-        # so reserve slots before the earliest carried origin; otherwise the summary is inserted later but
-        # sorts after its own tail on every reload.
-        display_orders: Optional[List[Optional[int]]] = None
-        inherited_orders = []
-        first_inherited_index = None
-        for index, msg in enumerate(compacted_messages):
+        """Display orders for fresh rows that sit ahead of a carried origin, shifting later rows so each
+        fresh row keeps its list position. ``None`` when nothing is carried."""
+        # Compaction emits fresh rows (the summary, a merged carrier, a verify/model-switch nudge) among a
+        # carried tail whose copies keep durable display origins. A fresh row without a reserved slot gets
+        # its new row id as order and sorts after the whole tail on every reload — hundreds of rows below
+        # its turn in long sessions. Reserve a slot just before the earliest carried origin that follows it.
+        orders: List[Optional[int]] = []
+        for msg in compacted_messages:
             origin_id = msg.get("_row_id")
-            if not isinstance(origin_id, int) or isinstance(origin_id, bool):
-                continue
-            origin = conn.execute(
-                "SELECT COALESCE(display_order, id) FROM messages WHERE id = ? AND session_id = ?",
-                (origin_id, session_id),
-            ).fetchone()
-            if origin is None:
-                continue
-            first_inherited_index = index if first_inherited_index is None else first_inherited_index
-            inherited_orders.append(origin[0])
-        if first_inherited_index:
-            origin_order = min(inherited_orders)
+            origin = None
+            if isinstance(origin_id, int) and not isinstance(origin_id, bool):
+                origin = conn.execute(
+                    "SELECT COALESCE(display_order, id) FROM messages WHERE id = ? AND session_id = ?",
+                    (origin_id, session_id),
+                ).fetchone()
+            orders.append(None if origin is None else origin[0])
+        if all(order is None for order in orders):
+            return None
+        # For each fresh row, the smallest carried order after it (None: nothing carried follows it).
+        next_carried: List[Optional[int]] = [None] * len(orders)
+        running: Optional[int] = None
+        for index in range(len(orders) - 1, -1, -1):
+            if orders[index] is None:
+                next_carried[index] = running
+            else:
+                order = orders[index]
+                assert order is not None
+                running = order if running is None else min(running, order)
+        groups: Dict[int, List[int]] = {}
+        for index, (order, boundary) in enumerate(zip(orders, next_carried)):
+            if order is None and boundary is not None:
+                groups.setdefault(boundary, []).append(index)
+        if not groups:
+            return None
+        display_orders: List[Optional[int]] = [None] * len(orders)
+        shifted_below = 0
+        for boundary in sorted(groups):
+            indexes = groups[boundary]
+            for offset, index in enumerate(indexes):
+                display_orders[index] = boundary + shifted_below + offset
+            shifted_below += len(indexes)
+        # Final order of an existing row x is x + (slots reserved at boundaries <= x). Shift from the highest
+        # boundary down: a row moved by a lower boundary can then never be re-tested against a higher one.
+        for boundary in sorted(groups, reverse=True):
             conn.execute(
                 "UPDATE messages SET display_order = display_order + ? "
                 "WHERE session_id = ? AND display_order >= ?",
-                (first_inherited_index, session_id, origin_order),
+                (len(groups[boundary]), session_id, boundary),
             )
-            display_orders = [
-                origin_order + index if index < first_inherited_index else None
-                for index in range(len(compacted_messages))
-            ]
         return display_orders
 
     def _archive_named_rows(

@@ -185,6 +185,53 @@ class TestDisplayProjectionParity:
             "target original", "new event",
         ]
 
+    def test_fresh_row_inside_carried_tail_keeps_its_position(self, db):
+        """A row compaction creates BETWEEN carried tail rows (verify nudge, model-switch note,
+        merged summary carrier) must render at that position, not after the whole tail.
+        Real sessions showed nudges jumping ~200 rows below their turn after each compaction."""
+        sid = "fresh-inside-tail"
+        db.create_session(sid, source="desktop")
+        db.append_messages_batch(sid, [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "follow-up"},
+            {"role": "assistant", "content": "later answer"},
+        ])
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        db.archive_and_compact(sid, [
+            {"role": "user", "content": "[CONTEXT COMPACTION] summary", "_compressed_summary": True},
+            history[0], history[1],
+            {"role": "user", "content": "[System: verify nudge]"},
+            history[2], history[3],
+        ])
+
+        expected = [
+            ("user", "[CONTEXT COMPACTION] summary"),
+            ("user", "question"),
+            ("assistant", "answer"),
+            ("user", "[System: verify nudge]"),
+            ("user", "follow-up"),
+            ("assistant", "later answer"),
+        ]
+        assert _texts(db.get_messages(sid, include_compacted=True)) == expected
+        assert _texts(db.get_messages_as_conversation(sid)) == expected
+
+        # A second compaction carries the nudge forward: it must stay put, not drift again.
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        db.archive_and_compact(sid, [
+            {"role": "user", "content": "[CONTEXT COMPACTION] summary 2", "_compressed_summary": True},
+            *history[3:],
+        ])
+        assert _texts(db.get_messages(sid, include_compacted=True)) == [
+            ("user", "[CONTEXT COMPACTION] summary"),
+            ("user", "question"),
+            ("assistant", "answer"),
+            ("user", "[CONTEXT COMPACTION] summary 2"),
+            ("user", "[System: verify nudge]"),
+            ("user", "follow-up"),
+            ("assistant", "later answer"),
+        ]
+
     def test_compaction_summary_precedes_carried_tail_on_reload(self, db):
         """A new handoff row must occupy the slot before tail copies that retain old display origins."""
         sid = "summary-before-tail"
