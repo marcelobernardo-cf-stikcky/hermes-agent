@@ -37,6 +37,14 @@ def _is_image_hint_view(live: Any, durable: Any) -> bool:
     durable_words = "\n".join(line for line in durable.split("\n") if not line.startswith("@image:")).strip()
     return "@image:" in durable and (words == durable_words or words.startswith(durable_words + "\n\n"))
 
+
+def _with_origin_tool_content(row: Any, origin_content: Any) -> Any:
+    """Display rows only. Prune rewrites a carried tool result to a one-line summary for the MODEL; the display
+    shows what the tool returned (a pruned clarify copy has no ``responses`` and its card rendered empty)."""
+    if origin_content is None or row["role"] != "tool" or origin_content == row["content"]:
+        return row
+    return {**dict(row), "content": origin_content}
+
 # One INSERT shape for every message writer (append, batch, replace, compact, import).
 _INSERT_MESSAGE_SQL = """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
@@ -1109,6 +1117,7 @@ class SessionMessagesMixin:
         the newest. The ONE definition every display projection shares. *rows* must be ordered by ``id``."""
         seen: Dict[Any, Any] = {}
         first_order: Dict[Any, int] = {}
+        origin_tool_content: Dict[Any, Any] = {}
         for row in rows:
             if self._is_model_only_row(row):
                 continue
@@ -1119,10 +1128,15 @@ class SessionMessagesMixin:
             cur = seen.get(key)
             if cur is None or (row["active"], row["id"]) > (cur["active"], cur["id"]):
                 seen[key] = row
+            if row["role"] == "tool":
+                # ponytail: sees only the rows the caller fetched; an original hidden as active=0/compacted=0
+                # stays pruned on this (gateway warm) path. The REST page path looks it up unfiltered.
+                origin_tool_content.setdefault(key, row["content"])  # rows arrive id-ordered: first = original
             order = row["display_order"] if isinstance(row["display_order"], int) else row["id"]
             first_order[key] = min(first_order.get(key, order), order)
         # Order by the event's durable origin, not the chosen representative's fresh row id.
-        return [seen[key] for key in sorted(seen, key=first_order.__getitem__)]
+        return [_with_origin_tool_content(seen[key], origin_tool_content.get(key))
+                for key in sorted(seen, key=first_order.__getitem__)]
 
     def _ensure_display_order(self, session_id: str) -> bool:
         """Backfill one legacy session once, preserving the pre-index display identity exactly."""
@@ -1245,14 +1259,22 @@ class SessionMessagesMixin:
                                 offset: int = 0, latest: bool = False):
         """One display-history projection for normal reads and transactional verification."""
         direction = "DESC" if latest else "ASC"
-        return conn.execute(
+        rows = conn.execute(
             f"""WITH page AS (
                    SELECT display_order FROM messages
                    WHERE session_id = ? AND (active = 1 OR compacted = 1){DISPLAY_VISIBLE_SQL}
                    GROUP BY display_order ORDER BY display_order {direction}
                    LIMIT ? OFFSET ?
                )
-               SELECT chosen.* FROM page
+               SELECT chosen.*, (
+                   -- No visibility filter: the original may sit hidden (active=0, compacted=0) behind its copy,
+                   -- and the representative is already chosen; this only restores what that tool call returned.
+                   SELECT origin.content FROM messages AS origin
+                   WHERE chosen.role = 'tool' AND origin.session_id = chosen.session_id
+                     AND origin.display_order = chosen.display_order AND origin.role = 'tool'
+                     AND origin.tool_call_id IS chosen.tool_call_id
+                   ORDER BY origin.id LIMIT 1
+               ) AS _origin_tool_content FROM page
                JOIN messages AS chosen ON chosen.id = (
                    SELECT candidate.id FROM messages AS candidate
                    WHERE candidate.session_id = ?
@@ -1263,6 +1285,8 @@ class SessionMessagesMixin:
                ORDER BY page.display_order ASC""",
             (session_id, -1 if limit is None else limit, offset, session_id),
         ).fetchall()
+        return [_with_origin_tool_content({k: row[k] for k in row.keys() if k != "_origin_tool_content"},
+                                          row["_origin_tool_content"]) for row in rows]
 
     def _display_messages_from_conn(self, conn, session_id: str) -> Optional[List[Dict[str, Any]]]:
         """Exact display snapshot on an already-held transaction; None means fail closed."""

@@ -105,6 +105,30 @@ class TestDisplayProjectionParity:
             "Earlier progress", "Later answer",
         ]
 
+    def test_display_reads_show_the_original_tool_result_not_the_pruned_copy(self, db):
+        """Prune rewrites a carried tool result to a one-line summary for the MODEL. Every display read must
+        still render what the tool returned (a clarify card lost its answers, a terminal card its output)."""
+        sid = "pruned-display"
+        db.create_session(sid, source="desktop")
+        db.append_messages_batch(sid, [
+            {"role": "assistant", "content": "", "timestamp": 101.0, "tool_calls": [
+                {"id": "ask", "type": "function", "function": {"name": "clarify", "arguments": "{}"}}]},
+            {"role": "tool", "content": '{"responses": [{"user_response": "yes"}]}', "tool_call_id": "ask",
+             "tool_name": "clarify", "timestamp": 102.0},
+            {"role": "assistant", "content": "Done", "timestamp": 200.0},
+        ])
+        history = db.get_messages_as_conversation(sid, include_row_ids=True)
+        history[1]["content"] = '[clarify] user responded: ["yes"]'
+        db.archive_and_compact(sid, history)
+
+        original = '{"responses": [{"user_response": "yes"}]}'
+        tool = lambda rows: [m["content"] for m in rows if m["role"] == "tool"]
+        assert tool(db.get_messages(sid, include_compacted=True)) == [original]
+        assert tool(db.get_messages(sid, include_compacted=True, latest=True, limit=120)) == [original]
+        assert tool(db.get_messages_as_conversation(sid, include_row_ids=True, include_compacted=True)) == [original]
+        # The model keeps the pruned view: that is the whole point of the prune.
+        assert tool(db.get_messages_as_conversation(sid)) == ['[clarify] user responded: ["yes"]']
+
     def test_unrelated_row_edit_keeps_inherited_identity_of_pruned_copies(self, db):
         """Any identity-invalidating UPDATE (the turn prologue rewrites its user row every turn) triggers
         the lazy backfill; it must not re-hash rows whose identity was inherited across a prune."""
