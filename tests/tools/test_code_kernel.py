@@ -103,6 +103,17 @@ class TestSessionStatePersistence(unittest.TestCase):
             second = _run("print(_j.dumps({'k': 1}))")
         self.assertIn('{"k": 1}', second["output"])
 
+    def test_cwd_change_keeps_state_and_follows_cwd(self):
+        """local: a terminal `cd` must not strand state in another kernel; each cell runs in the current cwd."""
+        a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+        with _kernel_config(mode="project"), \
+                patch("tools.code_execution_tool._resolve_child_cwd", side_effect=[a, b]):
+            _run("x = 41")
+            second = _run("import os; print(x + 1, os.getcwd())")
+        self.assertEqual(second["status"], "success", second)
+        self.assertIn("42", second["output"])
+        self.assertIn(os.path.realpath(b).lower(), os.path.realpath(second["output"].split(" ", 1)[1].strip()).lower())
+
 
 class TestKernelLifecycle(unittest.TestCase):
     def test_kernel_and_children_exit_when_its_backend_parent_dies(self):
