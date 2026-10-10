@@ -1231,7 +1231,7 @@ class GatewayAdapterLifecycleMixin:
     def _wire_adapter_handlers(
         self, adapter: BasePlatformAdapter, *, message_handler=None, fatal_error_handler=None,
         busy_session_handler=None, authorization_check=None, platform_event_handler=None,
-        busy_text_mode: Optional[str] = None, busy_text_timing: Optional[tuple[float, float]] = None,
+        reaction_handler=None, busy_text_mode: Optional[str] = None, busy_text_timing: Optional[tuple[float, float]] = None,
         human_delay: Optional[tuple[int, int]] | object = _UNSET,
     ) -> None:
         """Install the runner callbacks every adapter needs (defaults = primary handlers;
@@ -1242,7 +1242,7 @@ class GatewayAdapterLifecycleMixin:
         adapter.set_busy_session_handler(busy_session_handler or self._primary_busy_session_handler())
         _set_reaction = getattr(adapter, "set_reaction_handler", None)
         if callable(_set_reaction):
-            _set_reaction(self._handle_reaction_event)
+            _set_reaction(reaction_handler or self._handle_reaction_event)
         adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
         adapter.set_authorization_check(
             authorization_check or self._make_adapter_auth_check(adapter.platform)
@@ -1278,6 +1278,7 @@ class GatewayAdapterLifecycleMixin:
             busy_session_handler=self._make_profile_busy_session_handler(profile_name),
             authorization_check=self._make_adapter_auth_check(platform, profile_name=profile_name),
             platform_event_handler=self._make_profile_platform_event_handler(profile_name),
+            reaction_handler=self._make_profile_reaction_handler(profile_name),
             busy_text_mode=(
                 text_modes.get(profile_name, self._busy_text_mode)
                 if isinstance(text_modes, dict)
@@ -1588,6 +1589,18 @@ class GatewayAdapterLifecycleMixin:
             self._canonicalize(getattr(event, "source", None), transport_profile=profile_name)
             async with self._async_scope_or_null(_async_profile_runtime_scope, profile_home):
                 return await self._handle_message(event)
+
+        return _handler
+
+    def _make_profile_reaction_handler(self, profile_name: str):
+        """Reaction twin: emit under the profile scope so ``hooks`` resolves THIS profile's ``hooks/``
+        (unscoped, a secondary bot's reactions fired the launch profile's hooks)."""
+        from gateway.run import _async_profile_runtime_scope
+        profile_home = self._routed_profile_home(profile_name)
+
+        async def _handler(ctx):
+            async with self._async_scope_or_null(_async_profile_runtime_scope, profile_home):
+                return await self._handle_reaction_event(ctx)
 
         return _handler
 

@@ -578,3 +578,19 @@ async def test_secondary_human_delay_follows_profile_config_not_process_env(tmp_
     # A fresh adapter is off until the runner installs a range; env is never consulted.
     fresh = _adapter()
     assert fresh._human_delay_range_ms is None and fresh._get_human_delay() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_secondary_reaction_hooks_run_under_that_profile_home(tmp_path, monkeypatch):
+    """A secondary bot's reactions emit inside ITS profile scope, so ``hooks`` resolves that
+    profile's ``hooks/`` instead of the launch profile's (where they silently never fired)."""
+    from hermes_constants import get_hermes_home
+    runner = _runner()
+    seen = []
+    runner.hooks.emit = AsyncMock(side_effect=lambda name, ctx: seen.append((name, Path(get_hermes_home()))))
+    profile_home = tmp_path / "research"
+    await _load_profile_snapshot(runner, profile_home, None)
+    adapter = runner._profile_adapters["research"][Platform.TELEGRAM]
+    await adapter._reaction_handler({"event_name": "reaction:added", "reaction": "white_check_mark"})
+    assert seen == [("reaction:added", Path(runner._routed_profile_home("research")))], seen
+    assert seen[0][1].name == "research"
