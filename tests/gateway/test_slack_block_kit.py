@@ -94,7 +94,7 @@ class TestTables:
             "| b | fail |"
         )
         blocks = render_blocks(md)
-        assert len(blocks) == 1
+        assert _types(blocks) == ["table", "divider"]  # divisor de fim de mensagem (TestSeparatedMessages)
         assert blocks[0]["type"] == "table"
         rows = blocks[0]["rows"]
         # header + 2 body rows, 2 columns each
@@ -255,3 +255,19 @@ class TestSplitTextFenceBalanced:
             )
 
 
+
+
+class TestSeparatedMessages:
+    """Marcelo (2026-10-14): título grande + linha de contexto + divisor no fim de toda mensagem."""
+
+    def test_italic_line_under_header_becomes_context(self):
+        blocks = render_blocks("# Whisper parou\n_chamada encerrada · 16:56_\n\nAta gerada.")
+        assert _types(blocks) == ["header", "context", "section", "divider"]
+        assert blocks[1]["elements"][0] == {"type": "mrkdwn", "text": "_chamada encerrada · 16:56_"}
+
+    def test_italic_paragraph_not_under_header_stays_section(self):
+        assert _types(render_blocks("Oi\n\n_nota_")) == ["section", "section", "divider"]
+
+    def test_every_message_ends_with_one_divider(self):
+        assert _types(render_blocks("só texto")) == ["section", "divider"]
+        assert _types(render_blocks("a\n\n---")) == ["section", "divider"]

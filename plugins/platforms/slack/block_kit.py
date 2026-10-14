@@ -48,6 +48,7 @@ Block = Dict[str, Any]
 
 _HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
 _HEADER_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+_CONTEXT_RE = re.compile(r"^\s*_[^_\s][^\n]*_\s*$")  # linha inteira em _itálico_
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _ORDERED_RE = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
 _BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
@@ -391,6 +392,11 @@ def render_blocks(markdown: str, mrkdwn_fn=None) -> Optional[List[Block]]:
                 header = _header_block(hm.group(2))
                 if header is not None:
                     blocks.append(header)
+                    # Linha _itálica_ logo abaixo do título = contexto (pequeno/cinza) de apoio.
+                    if i + 1 < n and _CONTEXT_RE.match(lines[i + 1]):
+                        blocks.append({"type": "context", "elements": [
+                            {"type": "mrkdwn", "text": lines[i + 1].strip()}]})
+                        i += 1
                 i += 1
                 continue
 
@@ -472,6 +478,9 @@ def render_blocks(markdown: str, mrkdwn_fn=None) -> Optional[List[Block]]:
 
         if not blocks:
             return None
+        # Toda mensagem termina com um divisor: separa visualmente da próxima no canal.
+        if blocks[-1]["type"] != "divider":
+            blocks.append(_divider_block())
         if len(blocks) > MAX_BLOCKS:
             # Too structurally complex to express safely — let the caller fall
             # back to plain text rather than truncating and losing content.

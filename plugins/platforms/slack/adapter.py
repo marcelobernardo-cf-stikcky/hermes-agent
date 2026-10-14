@@ -6714,6 +6714,11 @@ async def _standalone_send(
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             payload = _standalone_post_kwargs(chat_id, formatted, unfurl_kwargs, thread_id)
+            # Mesmo Block Kit do adapter ao vivo: `hermes send`/cron fora do gateway não fica de fora.
+            if str((getattr(pconfig, "extra", None) or {}).get("rich_blocks", "")).strip().lower() in {"1", "true", "yes", "on"}:
+                blocks = sanitize_blocks(render_blocks(message, mrkdwn_fn=_standalone_format_mrkdwn))
+                if blocks:
+                    payload["blocks"] = blocks
             for tok in tokens:
                 data = await _slack_json_post(session, tok, "chat.postMessage", payload, _req_kw)
                 if data.get("ok"):

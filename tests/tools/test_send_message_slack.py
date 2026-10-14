@@ -112,3 +112,16 @@ def test_standalone_send_stops_on_non_token_error(monkeypatch, _standalone_send)
 
     assert result == {"error": "Slack API error: msg_too_long"}
     assert len(fake_session.calls) == 1
+
+
+def test_standalone_send_attaches_blocks_when_rich_blocks_on(monkeypatch, _standalone_send):
+    """`hermes send`/cron fora do gateway respeita slack.extra.rich_blocks como o adapter ao vivo."""
+    fake_session = _SlackSession()
+    monkeypatch.setattr("aiohttp.ClientSession", lambda *args, **kwargs: fake_session)
+    on = SimpleNamespace(enabled=True, token="tok-a", extra={"rich_blocks": True})
+    asyncio.run(_standalone_send(on, "C123", "# Título\n_ctx_\n\ncorpo"))
+    blocks = fake_session.calls[-1][1]["blocks"]
+    assert [b["type"] for b in blocks] == ["header", "context", "section", "divider"]
+    off = SimpleNamespace(enabled=True, token="tok-a", extra={})
+    asyncio.run(_standalone_send(off, "C123", "# Título"))
+    assert "blocks" not in fake_session.calls[-1][1]
