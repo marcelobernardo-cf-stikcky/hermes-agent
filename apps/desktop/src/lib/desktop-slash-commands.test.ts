@@ -14,6 +14,7 @@ import {
   isDesktopSlashSuggestionWithOptions,
   isModelPickerCommand,
   isPickerCommand,
+  isSkillsReviewSlash,
   rankSkillCommands,
   rememberDesktopCommandsCatalog,
   resolveDesktopCommand,
@@ -270,6 +271,22 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/clear')?.surface).toEqual({ kind: 'unavailable', reason: 'terminal' })
     // Skill / quick commands aren't in the registry.
     expect(resolveDesktopCommand('/gif-search')).toBeNull()
+  })
+})
+
+describe('isSkillsReviewSlash', () => {
+  it('runs only the write-approval subcommands of the settings-owned /skills in chat', () => {
+    expect(isDesktopSlashCommand('/skills')).toBe(false)
+
+    for (const arg of ['pending', 'approve 5dacfb9a', 'REJECT all', 'diff abc', ' apply x']) {
+      expect(isSkillsReviewSlash('skills', arg)).toBe(true)
+    }
+
+    for (const arg of ['', 'search foo', 'install bar', 'approval off', 'mode on']) {
+      expect(isSkillsReviewSlash('skills', arg)).toBe(false)
+    }
+
+    expect(isSkillsReviewSlash('memory', 'pending')).toBe(false)
   })
 })
 

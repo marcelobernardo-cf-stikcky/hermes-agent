@@ -14,6 +14,7 @@ import {
   type DesktopPickerId,
   desktopSlashUnavailableMessage,
   isDesktopSlashCommand,
+  isSkillsReviewSlash,
   resolveDesktopCommand
 } from '@/lib/desktop-slash-commands'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
@@ -265,7 +266,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
 
         const { render: renderSlashOutput, sessionId, storedSessionId } = resolved
 
-        if (!isDesktopSlashCommand(name)) {
+        if (!isDesktopSlashCommand(name) && !isSkillsReviewSlash(name, arg)) {
           renderSlashOutput(desktopSlashUnavailableMessage(name) || `/${name} is not available in the desktop app.`)
 
           return
@@ -1240,7 +1241,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
         }
 
         const ctx: SlashActionCtx = { arg, command, name, recordInput, sessionHint }
-        const surface = resolveDesktopCommand(`/${name}`)?.surface
+        const surface = isSkillsReviewSlash(name, arg) ? undefined : resolveDesktopCommand(`/${name}`)?.surface
 
         switch (surface?.kind) {
           case 'unavailable': {

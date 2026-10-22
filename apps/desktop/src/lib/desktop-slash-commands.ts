@@ -543,6 +543,14 @@ export function slashCompletionGroup(command: string, kind?: string | null): 'Co
   return isDesktopSlashExtensionCommand(command) ? 'Skills' : 'Commands'
 }
 
+// `/skills` is settings-owned (hub browse/install lives in the sidebar), but the sidebar has no
+// pending-write review, so the write-approval subcommands run in chat like `/memory` does.
+const SKILLS_REVIEW_WORDS = new Set(['pending', 'approve', 'apply', 'reject', 'deny', 'drop', 'diff'])
+
+export function isSkillsReviewSlash(name: string, arg: string): boolean {
+  return canonicalDesktopSlashCommand(name) === '/skills' && SKILLS_REVIEW_WORDS.has(arg.trim().split(/\s+/)[0]?.toLowerCase() ?? '')
+}
+
 /** Gates execution: true unless the command is a known no-desktop-surface command. */
 export function isDesktopSlashCommand(command: string): boolean {
   const spec = resolveDesktopCommand(command)
