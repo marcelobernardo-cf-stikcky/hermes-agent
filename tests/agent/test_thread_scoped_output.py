@@ -14,6 +14,7 @@ import threading
 import time
 
 import agent.thread_scoped_output as thread_output
+from agent.process_bootstrap import _install_safe_stdio
 from agent.thread_scoped_output import thread_scoped_silence
 
 
@@ -166,3 +167,19 @@ def test_silence_survives_redirect_restoring_an_older_proxy(monkeypatch):
     finally:
         release.set()
         sys.stdout, sys.stderr = original_stdout, original_stderr
+
+
+def test_safe_stdio_and_silence_never_build_a_proxy_chain(monkeypatch):
+    """Every agent init calls _install_safe_stdio; interleaved with silence it must not nest wrappers."""
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setattr(thread_output, "_installed", {})
+    _install_safe_stdio()
+    with thread_scoped_silence():
+        pass
+    first = sys.stdout
+    for _ in range(5):
+        _install_safe_stdio()
+        with thread_scoped_silence():
+            pass
+    assert sys.stdout is first

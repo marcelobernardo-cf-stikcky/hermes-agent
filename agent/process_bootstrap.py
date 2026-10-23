@@ -326,9 +326,14 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
 
 def _install_safe_stdio() -> None:
     """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
+    from agent.thread_scoped_output import _ThreadRoutingStream
+
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
-        if stream is not None and not isinstance(stream, _SafeWriter):
+        # The routing proxy already swallows dead-target errors; wrapping it makes
+        # thread_scoped_silence re-wrap us, growing a chain per agent init until
+        # attribute lookup overflows the stack.
+        if stream is not None and not isinstance(stream, (_SafeWriter, _ThreadRoutingStream)):
             setattr(sys, stream_name, _SafeWriter(stream))
 
 
