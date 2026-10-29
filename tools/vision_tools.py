@@ -1037,6 +1037,9 @@ async def video_analyze_tool(
         debug_call_data["video_size_bytes"] = video_size_bytes
         messages = _media_messages(prompt, "video_url", video_data_url)
         call_kwargs = _aux_call_kwargs(messages, model, 180.0, min_timeout=180.0)
+        # auxiliary.video.provider routes video off the vision provider (e.g. Claude, which rejects video_url).
+        if _vprov := str(_cfg_auxiliary("video", "provider") or "").strip():
+            call_kwargs["provider"] = _vprov
         analysis = await _call_vision_llm(call_kwargs, "Empty video response, retrying once")
         return analysis, None
     return await _run_analysis("video", video_url, user_prompt, model, stage)

@@ -916,3 +916,14 @@ def test_build_gemini_request_tools_plus_json_output_only_on_gemini3(model, keep
         tool_choice="auto", model=model, response_format={"type": "json_object"}, tools_as_json_schema=True,
     )["generationConfig"]
     assert ("responseMimeType" in generation) is keeps_json
+
+
+def test_video_url_data_part_becomes_inline_data():
+    # video_analyze sends video_url parts; dropping them made Gemini answer from the prompt alone.
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+    parts = _extract_multimodal_parts([
+        {"type": "text", "text": "q"},
+        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ])
+    assert [p.get("inlineData", {}).get("mimeType") for p in parts] == [None, "video/mp4", "image/png"]

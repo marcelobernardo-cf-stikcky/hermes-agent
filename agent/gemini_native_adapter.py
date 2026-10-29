@@ -274,9 +274,10 @@ def _coerce_content_to_text(content: Any) -> str:
 
 
 def _inline_data_part(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``inlineData`` part for an ``image_url`` item carrying a ``data:`` URL; None otherwise."""
-    url = (item.get("image_url") or {}).get("url") or ""
-    if item.get("type") != "image_url" or not isinstance(url, str) or not url.startswith("data:"):
+    """``inlineData`` part for an ``image_url``/``video_url`` item carrying a ``data:`` URL; None otherwise."""
+    kind = item.get("type")
+    url = (item.get(kind) or {}).get("url") or "" if kind in ("image_url", "video_url") else ""
+    if not isinstance(url, str) or not url.startswith("data:"):
         return None
     try:
         header, encoded = url.split(",", 1)
