@@ -1111,3 +1111,19 @@ class TestVisionCpuBurstCap:
             f"analyses were serialized to the cap (peak={calls_peak}); only the "
             "encode burst should be bounded, not the whole call"
         )
+
+
+def test_video_has_audio_reads_ffprobe(tmp_path):
+    # Silent files must be flagged so video models stop inventing soundtracks.
+    import shutil, subprocess
+    import pytest
+    from tools.vision_tools import _video_has_audio
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    silent, sound = tmp_path / "s.mp4", tmp_path / "a.mp4"
+    base = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1"]
+    subprocess.run(base + ["-y", str(silent)], check=True)
+    subprocess.run(base + ["-f", "lavfi", "-i", "sine=d=1", "-shortest", "-y", str(sound)], check=True)
+    assert _video_has_audio(silent) is False
+    assert _video_has_audio(sound) is True
+    assert _video_has_audio(tmp_path / "missing.mp4") is None

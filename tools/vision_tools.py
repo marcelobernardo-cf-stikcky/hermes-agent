@@ -1015,6 +1015,24 @@ async def _materialize_video(video_url: str, task_id: Optional[str], temp_paths:
     raise ValueError("Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path.")
 
 
+# Video models invent soundtracks for silent files; tell them when ffprobe finds no audio stream.
+_NO_AUDIO_NOTE = ("[Fact from ffprobe: this file has NO audio track. Do not describe music, voice or sound "
+                  "effects; state that the video is silent.]\n\n")
+
+
+def _video_has_audio(path: Path) -> Optional[bool]:
+    """True/False from ffprobe audio-stream count; None when ffprobe is missing or fails (no claim made)."""
+    import shutil, subprocess
+    if not (ffprobe := shutil.which("ffprobe")):
+        return None
+    try:
+        out = subprocess.run([ffprobe, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                              "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return bool(out.stdout.strip()) if out.returncode == 0 else None
+
+
 async def video_analyze_tool(
     video_url: str, user_prompt: str, model: str = None, task_id: Optional[str] = None) -> str:
     """Analyze a video via multimodal LLM. Returns JSON {success, analysis}."""
@@ -1035,6 +1053,8 @@ async def video_analyze_tool(
                 f"(limit {_MAX_VIDEO_BASE64_BYTES / (1024 * 1024):.0f} MB). "
                 f"Compress or trim the video and retry.")
         debug_call_data["video_size_bytes"] = video_size_bytes
+        if _video_has_audio(temp_video_path) is False:
+            prompt = _NO_AUDIO_NOTE + prompt
         messages = _media_messages(prompt, "video_url", video_data_url)
         call_kwargs = _aux_call_kwargs(messages, model, 180.0, min_timeout=180.0)
         # auxiliary.video.provider routes video off the vision provider (e.g. Claude, which rejects video_url).
