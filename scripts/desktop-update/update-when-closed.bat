@@ -8,7 +8,7 @@ rem   2. fast-forwards LIVE_BRANCH to PREPARED_BRANCH (refuses anything else)
 rem   3. runs the official Desktop updater against LIVE_BRANCH (never -Channel
 rem      main: on this fork that would switch to origin/main and drop patches)
 rem   4. reopens Hermes and closes itself on success.
-rem Run a COPY outside the repo: step 2 rewrites this file inside the checkout,
+rem Needs update-when-closed.ps1 beside it. Run a COPY outside the repo: step 2 rewrites this file inside the checkout,
 rem and cmd.exe reads a running .bat incrementally.
 rem Usage: update-when-closed.bat <prepared-branch>
 if not defined HERMES_HOME set "HERMES_HOME=%LOCALAPPDATA%\hermes"
@@ -18,6 +18,11 @@ set "PREPARED_BRANCH=%~1"
 set "UPDATE_SCRIPT=%INSTALL_ROOT%\scripts\desktop-update\windows.ps1"
 set "DESKTOP_EXE=%INSTALL_ROOT%\apps\desktop\release\win-unpacked\Hermes.exe"
 set "GRACE_SECONDS=60"
+set "PS_HELPER=%~dp0update-when-closed.ps1"
+if not exist "%PS_HELPER%" (
+    echo [ERRO] Falta %PS_HELPER% ao lado deste .bat. Nada foi alterado.
+    goto :fail
+)
 if "%PREPARED_BRANCH%"=="" (
     echo [ERRO] Uso: %~nx0 ^<branch-preparada^>
     goto :fail
@@ -40,10 +45,9 @@ rem The Tailscale serve loop (serve-remote.cmd) respawns hermes.exe 15s after it
 rem i.e. mid-update: stop the loop first and restart it at the end if it was running.
 set "SERVE_REMOTE_VBS=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\hermes-serve-remote.vbs"
 set "SERVE_REMOTE_WAS_RUNNING="
-for /f %%C in ('powershell.exe -NoProfile -NonInteractive -Command "$l=@(Get-CimInstance Win32_Process | ? { $_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*serve-remote.cmd*' }); $l | %% { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $l.Count"') do if not "%%C"=="0" set "SERVE_REMOTE_WAS_RUNNING=1"
+for /f %%C in ('powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%PS_HELPER%" -Op StopServeLoop') do if not "%%C"=="0" set "SERVE_REMOTE_WAS_RUNNING=1"
 if defined SERVE_REMOTE_WAS_RUNNING echo   loop serve-remote (Tailscale) pausado; volta no fim.
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ^
-  "$n=@('Hermes','hermes'); Get-Process -Name 'Hermes' -ErrorAction SilentlyContinue | ? { $_.MainWindowHandle -ne 0 } | % { [void]$_.CloseMainWindow() }; $t=Get-Date; while(@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0 -and ((Get-Date)-$t).TotalSeconds -lt %GRACE_SECONDS%){ Start-Sleep 3; '  aguardando: ' + ((Get-Process -Name $n -ErrorAction SilentlyContinue | % { $_.ProcessName + '(' + $_.Id + ')' }) -join ', ') }; $left=@(Get-Process -Name $n -ErrorAction SilentlyContinue); if($left.Count){ '  forcando: ' + (($left | % { $_.ProcessName + '(' + $_.Id + ')' }) -join ', '); $left | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3 }; if(@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count){ exit 1 }"
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%PS_HELPER%" -Op CloseHermes -GraceSeconds %GRACE_SECONDS%
 if errorlevel 1 (
     echo [ERRO] Nao consegui fechar todos os processos Hermes. Nada foi alterado.
     goto :reopen_fail
