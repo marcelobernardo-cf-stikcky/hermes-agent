@@ -6,6 +6,8 @@ uv.lock text eol=lf
 # Without this, Windows checkout converts to CRLF and breaks `exec` in the
 # container entrypoint with "no such file or directory".
 *.sh        text eol=lf
+# cmd.exe misparses LF-only batch files (labels/goto); keep them CRLF.
+*.bat       text eol=crlf
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker/entrypoint.sh text eol=lf

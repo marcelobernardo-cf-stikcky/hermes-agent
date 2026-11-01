@@ -23,7 +23,7 @@ DEFUSE = {
     "-Op CloseHermes -GraceSeconds %GRACE_SECONDS%": "-Op CloseHermes -GraceSeconds %GRACE_SECONDS% -DryRun",
     'git -C "%INSTALL_ROOT%" tag -f': "echo DRY tag",
     'git -C "%INSTALL_ROOT%" merge --ff-only': "echo DRY merge",
-    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process': 'echo DRY updater & rem "',
+    '"%HERMES_CLI%" update': "echo DRY updater",
     'start "" "%DESKTOP_EXE%"': "echo DRY start desktop",
     'start "" wscript.exe': "echo DRY restart serve-loop",
     "timeout /t 20 >nul": "rem",
@@ -50,6 +50,8 @@ def test_closed_app_bat_reaches_every_step(tmp_path: Path) -> None:
     exe = install / "apps" / "desktop" / "release" / "win-unpacked" / "Hermes.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"")  # the relaunch is guarded by `if exist`
+    (install.parent / "bin").mkdir()
+    (install.parent / "bin" / "hermes.exe").write_bytes(b"")  # so is the CLI
 
     bat = (SRC / "update-when-closed.bat").read_bytes().decode()
     assert "\n" not in bat.replace("\r\n", ""), "cmd.exe needs CRLF line endings"
@@ -80,6 +82,8 @@ def test_closed_app_bat_refuses_a_non_fast_forward(tmp_path: Path) -> None:
     _git(install, "checkout", "-q", "--orphan", "other")
     _git(install, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "other")
     _git(install, "checkout", "-q", "local/delegated-kanban-guard")
+    (install.parent / "bin").mkdir()
+    (install.parent / "bin" / "hermes.exe").write_bytes(b"")
     shutil.copy(SRC / "update-when-closed.bat", tmp_path)
     shutil.copy(SRC / "update-when-closed.ps1", tmp_path)
 

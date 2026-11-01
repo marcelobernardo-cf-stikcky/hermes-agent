@@ -5,8 +5,8 @@ title Hermes update - NAO FECHE ESTA JANELA
 rem Closed-app update for this fork, fully driven from here:
 rem   1. closes Hermes (graceful, then forced after a grace period)
 rem   2. fast-forwards LIVE_BRANCH to PREPARED_BRANCH (refuses anything else)
-rem   3. runs the official Desktop updater against LIVE_BRANCH (never -Channel
-rem      main: on this fork that would switch to origin/main and drop patches)
+rem   3. runs `hermes update --branch LIVE_BRANCH` directly (windows.ps1 -NoUi exits 2:
+rem      its own marker custodian holds the update lock). Never --channel main.
 rem   4. reopens Hermes and closes itself on success.
 rem Needs update-when-closed.ps1 beside it. Run a COPY outside the repo: step 2 rewrites this file inside the checkout,
 rem and cmd.exe reads a running .bat incrementally.
@@ -15,10 +15,14 @@ if not defined HERMES_HOME set "HERMES_HOME=%LOCALAPPDATA%\hermes"
 set "INSTALL_ROOT=%HERMES_HOME%\hermes-agent"
 set "LIVE_BRANCH=local/delegated-kanban-guard"
 set "PREPARED_BRANCH=%~1"
-set "UPDATE_SCRIPT=%INSTALL_ROOT%\scripts\desktop-update\windows.ps1"
+set "HERMES_CLI=%HERMES_HOME%\bin\hermes.exe"
 set "DESKTOP_EXE=%INSTALL_ROOT%\apps\desktop\release\win-unpacked\Hermes.exe"
 set "GRACE_SECONDS=60"
 set "PS_HELPER=%~dp0update-when-closed.ps1"
+if not exist "%HERMES_CLI%" (
+    echo [ERRO] Falta %HERMES_CLI%. Nada foi alterado.
+    goto :fail
+)
 if not exist "%PS_HELPER%" (
     echo [ERRO] Falta %PS_HELPER% ao lado deste .bat. Nada foi alterado.
     goto :fail
@@ -66,8 +70,8 @@ if errorlevel 1 (
     goto :reopen_fail
 )
 
-echo [3/4] Dependencias + rebuild do Desktop (~10-20 min). Uma linha a cada 30s prova que nao travou.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%UPDATE_SCRIPT%\"','-InstallRoot','\"%INSTALL_ROOT%\"','-Branch','%LIVE_BRANCH%','-NoUi' -NoNewWindow -PassThru; $null=$p.Handle; $t=Get-Date; while(-not $p.WaitForExit(30000)){ '  [{0:HH:mm}] ainda rodando ({1:N0} min) - nao abra o Hermes' -f (Get-Date),((Get-Date)-$t).TotalMinutes }; exit $p.ExitCode"
+echo [3/4] Dependencias + rebuild do Desktop (~10-20 min). O progresso aparece abaixo.
+"%HERMES_CLI%" update --yes --gateway --branch %LIVE_BRANCH% --keep-stash
 set "UPDATE_EXIT=%ERRORLEVEL%"
 
 echo.
