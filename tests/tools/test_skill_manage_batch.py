@@ -330,7 +330,7 @@ class TestSkillManageBatch(unittest.TestCase):
         for res in (r, flat):
             self.assertFalse(res.get("success"), res)
             self.assertFalse(res.get("staged"), res)
-            self.assertIn("system-prompt budget", res["error"])
+            self.assertIn("60-char skill index", res["error"])
 
 
 if __name__ == "__main__":

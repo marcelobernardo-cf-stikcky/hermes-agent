@@ -101,7 +101,7 @@ class _FakeAgent:
 
 @pytest.mark.platforms("linux")
 @pytest.mark.asyncio
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 async def test_bare_ping_request_produces_proper_response_and_no_stderr_noise(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

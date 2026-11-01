@@ -246,7 +246,6 @@ def build_model_options_payload(
         picker_hints=True, canonical_order=True, pricing=True, pricing_cache_only=not refresh,
         capabilities=True, featured=True, for_picker=True, fast_custom_probe=False,
         refresh=refresh, probe_custom_providers=refresh, probe_current_custom_provider=not refresh,
-        for_picker=True,
         non_blocking_catalogs=not refresh,
     )
     _apply_limits(payload["providers"])

@@ -1,63 +1,81 @@
 @echo off
 setlocal EnableExtensions
+title Hermes update - NAO FECHE ESTA JANELA
 
-rem Promote the prepared local branch into the live install, then run the
-rem Desktop updater against THAT branch (never -Channel main: on this fork it
-rem would switch the checkout to origin/main and drop the local patches).
-rem Nothing is force-stopped: close Hermes first and leave this window open.
+rem Closed-app update for this fork, fully driven from here:
+rem   1. closes Hermes (graceful, then forced after a grace period)
+rem   2. fast-forwards LIVE_BRANCH to PREPARED_BRANCH (refuses anything else)
+rem   3. runs the official Desktop updater against LIVE_BRANCH (never -Channel
+rem      main: on this fork that would switch to origin/main and drop patches)
+rem   4. reopens Hermes and closes itself on success.
+rem Run a COPY outside the repo: step 2 rewrites this file inside the checkout,
+rem and cmd.exe reads a running .bat incrementally.
+rem Usage: update-when-closed.bat <prepared-branch>
 if not defined HERMES_HOME set "HERMES_HOME=%LOCALAPPDATA%\hermes"
 set "INSTALL_ROOT=%HERMES_HOME%\hermes-agent"
 set "LIVE_BRANCH=local/delegated-kanban-guard"
-set "PREPARED_BRANCH=update/prepared-upstream-20260925"
+set "PREPARED_BRANCH=%~1"
 set "UPDATE_SCRIPT=%INSTALL_ROOT%\scripts\desktop-update\windows.ps1"
-
-echo Hermes precisa estar totalmente fechado para atualizar.
-echo Aguardando os processos Hermes/Hermes CLI terminarem...
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ^
-  "$names = @('Hermes','hermes'); while (@(Get-Process -Name $names -ErrorAction SilentlyContinue).Count -gt 0) { Write-Host ('Ainda em execucao: ' + ((Get-Process -Name $names -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName + ' (PID ' + $_.Id + ')' }) -join ', ')); Start-Sleep -Seconds 2 }"
-if errorlevel 1 goto :fail_wait
+set "DESKTOP_EXE=%INSTALL_ROOT%\apps\desktop\release\win-unpacked\Hermes.exe"
+set "GRACE_SECONDS=60"
+if "%PREPARED_BRANCH%"=="" (
+    echo [ERRO] Uso: %~nx0 ^<branch-preparada^>
+    goto :fail
+)
 
 for /f "delims=" %%B in ('git -C "%INSTALL_ROOT%" branch --show-current') do set "CURRENT_BRANCH=%%B"
 if /i not "%CURRENT_BRANCH%"=="%LIVE_BRANCH%" (
     echo [ERRO] Instalacao esta na branch "%CURRENT_BRANCH%", esperado "%LIVE_BRANCH%". Nada foi alterado.
     goto :fail
 )
+git -C "%INSTALL_ROOT%" merge-base --is-ancestor HEAD "%PREPARED_BRANCH%"
+if errorlevel 1 (
+    echo [ERRO] %PREPARED_BRANCH% nao e fast-forward de %LIVE_BRANCH%. Nada foi alterado.
+    goto :fail
+)
+for /f "delims=" %%S in ('git -C "%INSTALL_ROOT%" rev-parse --short HEAD') do set "ROLLBACK_SHA=%%S"
+
+echo [1/4] Fechando o Hermes (ate %GRACE_SECONDS%s com calma, depois forcado)...
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ^
+  "$n=@('Hermes','hermes'); Get-Process -Name 'Hermes' -ErrorAction SilentlyContinue | ? { $_.MainWindowHandle -ne 0 } | % { [void]$_.CloseMainWindow() }; $t=Get-Date; while(@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0 -and ((Get-Date)-$t).TotalSeconds -lt %GRACE_SECONDS%){ Start-Sleep 3; '  aguardando: ' + ((Get-Process -Name $n -ErrorAction SilentlyContinue | % { $_.ProcessName + '(' + $_.Id + ')' }) -join ', ') }; $left=@(Get-Process -Name $n -ErrorAction SilentlyContinue); if($left.Count){ '  forcando: ' + (($left | % { $_.ProcessName + '(' + $_.Id + ')' }) -join ', '); $left | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3 }; if(@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count){ exit 1 }"
+if errorlevel 1 (
+    echo [ERRO] Nao consegui fechar todos os processos Hermes. Nada foi alterado.
+    goto :reopen_fail
+)
+
 git -C "%INSTALL_ROOT%" diff --quiet HEAD
 if errorlevel 1 (
     echo [ERRO] Instalacao tem alteracoes locais nao commitadas. Nada foi alterado.
-    goto :fail
+    goto :reopen_fail
 )
-
-echo Hermes fechado. Aplicando %PREPARED_BRANCH% (fast-forward apenas)...
+echo [2/4] Aplicando %PREPARED_BRANCH% (fast-forward apenas; rollback = %ROLLBACK_SHA%)...
+git -C "%INSTALL_ROOT%" tag -f "pre-update-%ROLLBACK_SHA%" "%ROLLBACK_SHA%" >nul
 git -C "%INSTALL_ROOT%" merge --ff-only "%PREPARED_BRANCH%"
 if errorlevel 1 (
     echo [ERRO] Fast-forward recusado. Nada foi alterado.
-    goto :fail
+    goto :reopen_fail
 )
 
-if not exist "%UPDATE_SCRIPT%" (
-    echo [ERRO] Script de update nao encontrado: %UPDATE_SCRIPT%
-    goto :fail
-)
-echo Sincronizando dependencias e rebuild do Desktop...
-echo O update leva ~10-15 min e o log detalhado so aparece no fim. Uma linha "ainda rodando" a cada 30s prova que nao travou.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%UPDATE_SCRIPT%\"','-InstallRoot','\"%INSTALL_ROOT%\"','-Branch','%LIVE_BRANCH%','-NoUi' -NoNewWindow -PassThru; $null=$p.Handle; $t=Get-Date; while(-not $p.WaitForExit(30000)){ '[{0:HH:mm}] ainda rodando ({1:N0} min) - nao abra o Hermes' -f (Get-Date),((Get-Date)-$t).TotalMinutes }; exit $p.ExitCode"
+echo [3/4] Dependencias + rebuild do Desktop (~10-20 min). Uma linha a cada 30s prova que nao travou.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','\"%UPDATE_SCRIPT%\"','-InstallRoot','\"%INSTALL_ROOT%\"','-Branch','%LIVE_BRANCH%','-NoUi' -NoNewWindow -PassThru; $null=$p.Handle; $t=Get-Date; while(-not $p.WaitForExit(30000)){ '  [{0:HH:mm}] ainda rodando ({1:N0} min) - nao abra o Hermes' -f (Get-Date),((Get-Date)-$t).TotalMinutes }; exit $p.ExitCode"
 set "UPDATE_EXIT=%ERRORLEVEL%"
 
 echo.
 if "%UPDATE_EXIT%"=="0" (
-    echo [OK] Update concluido. Voce pode reabrir o Hermes agora.
-    pause
+    echo [4/4] Update concluido. Reabrindo o Hermes...
+    if exist "%DESKTOP_EXE%" start "" "%DESKTOP_EXE%"
+    echo Esta janela fecha sozinha em 20s.
+    timeout /t 20 >nul
     exit /b 0
 )
 echo [ERRO] Update falhou com codigo %UPDATE_EXIT%.
-echo Revise o log em %HERMES_HOME%\logs\desktop-update-handoff.log antes de reabrir o Hermes.
-echo Para voltar: git -C "%INSTALL_ROOT%" reset --hard 2f9699f72b
-pause
-exit /b %UPDATE_EXIT%
+echo Log: %HERMES_HOME%\logs\desktop-update-handoff.log
+echo Voltar ao estado anterior: git -C "%INSTALL_ROOT%" reset --hard pre-update-%ROLLBACK_SHA%
+goto :reopen_fail
 
-:fail_wait
-echo [ERRO] Nao foi possivel confirmar que Hermes esta fechado.
+:reopen_fail
+echo Reabrindo o Hermes para voce nao ficar sem ele...
+if exist "%DESKTOP_EXE%" start "" "%DESKTOP_EXE%"
 :fail
 pause
 exit /b 3

@@ -84,7 +84,6 @@ class TestCronFilePermissions(unittest.TestCase):
             self.assertEqual(dir_mode, 0o700)
 
 
-@pytest.mark.linux_only
 class TestConfigFilePermissions(unittest.TestCase):
     """Verify config files get secure permissions."""
 

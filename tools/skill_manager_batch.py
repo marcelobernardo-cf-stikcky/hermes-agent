@@ -75,8 +75,11 @@ def _op_shape_error(action: str, args: dict):
         if missing(args.get(arg)):
             return message + _misplaced_text_hint(action, args)
     if action == "create":
-        from tools.skill_manager_tool import _validate_content_size, _validate_frontmatter
-        return _validate_frontmatter(args["content"], new_skill=True) or _validate_content_size(args["content"])
+        from tools.skill_manager_tool import (
+            _description_budget_error, _validate_content_size, _validate_frontmatter)
+        content = args["content"]
+        return (_validate_frontmatter(content) or _description_budget_error(content)
+                or _validate_content_size(content))
     if action == "patch":
         # Every patch shape miss is decided here, not in the handler, so a batch never applies
         # op[0] only to roll it back over op[1]'s missing new_string or content+old_string mix.
