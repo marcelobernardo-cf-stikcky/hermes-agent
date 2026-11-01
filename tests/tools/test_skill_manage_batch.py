@@ -309,6 +309,29 @@ class TestSkillManageBatch(unittest.TestCase):
         self.assertTrue(out["success"], out)
         self.assertEqual(out["operations_applied"], 2)
 
+    def test_invalid_create_is_rejected_before_staging(self):
+        """A create that can only fail on replay (description over the prompt budget) must
+        fail at the call, never reach the approval queue: batch AND flat shape."""
+        from unittest.mock import patch as _patch
+
+        class _Decision:
+            allow = False
+            blocked = False
+            message = "staged for review"
+
+        long_desc = "---\nname: probe\ndescription: " + "Use when x. " * 7 + "\n---\nBody.\n"
+        import tools.write_approval as wa
+
+        with _patch.object(wa, "evaluate_gate", return_value=_Decision()), \
+             _patch.object(wa, "stage_write") as stage:
+            r = self._call("probe", [{"action": "create", "content": long_desc}])
+            flat = json.loads(self.smt.skill_manage(action="create", name="probe", content=long_desc))
+        stage.assert_not_called()
+        for res in (r, flat):
+            self.assertFalse(res.get("success"), res)
+            self.assertFalse(res.get("staged"), res)
+            self.assertIn("system-prompt budget", res["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -781,10 +781,12 @@ def skill_manage(
     args = dict(content=content, category=category, file_path=file_path, file_content=file_content,
                 old_string=old_string, new_string=new_string, replace_all=replace_all,
                 absorbed_into=absorbed_into)
-    if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
-        return gate_result
+    # Shape (and a create's SKILL.md validity) is checked BEFORE the gate: a staged write that
+    # can only fail on replay wastes the owner's approval round.
     if (shape_err := _op_shape_error(action, args)) is not None:
         return tool_error(shape_err, success=False)
+    if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
+        return gate_result
     # Validate before the lock is keyed on the name, so a rejected name never touches .locks/
     # (create takes a bare name; the other actions also accept ``category/name``).
     if (name_err := _validate_name(name if action == "create" or not name else Path(name).name)) is not None:

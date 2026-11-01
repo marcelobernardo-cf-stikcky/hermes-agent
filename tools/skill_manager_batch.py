@@ -67,10 +67,16 @@ def _misplaced_text_hint(action: str, args: dict) -> str:
 def _op_shape_error(action: str, args: dict):
     """Argument-shape error text for one op, or None. Only shape misses carry the misplaced-text
     hint: a patch whose real problem is an unmatched old_string must not be steered to a full
-    rewrite. Pure function so the batch can reject a misfiled op BEFORE any sibling is applied."""
+    rewrite. Pure function so the batch can reject a misfiled op BEFORE any sibling is applied.
+    A create's SKILL.md is validated here too (frontmatter, 60-char description, size): this
+    runs before the approval gate stages the write, so an invalid create fails at the call
+    instead of at the owner's /skills approve."""
     for arg, missing, message in _REQUIRED_ARGS.get(action, ()):
         if missing(args.get(arg)):
             return message + _misplaced_text_hint(action, args)
+    if action == "create":
+        from tools.skill_manager_tool import _validate_content_size, _validate_frontmatter
+        return _validate_frontmatter(args["content"], new_skill=True) or _validate_content_size(args["content"])
     if action == "patch":
         # Every patch shape miss is decided here, not in the handler, so a batch never applies
         # op[0] only to roll it back over op[1]'s missing new_string or content+old_string mix.
