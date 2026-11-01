@@ -41,7 +41,7 @@ def _force_local_terminal(monkeypatch):
 
 from tools.code_execution_tool import execute_code
 
-from tools.code_kernel import _KERNELS, _sweep_orphaned_kernel_dirs, shutdown_all_kernels
+from tools.code_kernel import _KERNELS, shutdown_all_kernels
 
 
 @contextmanager
@@ -116,14 +116,12 @@ class TestSessionStatePersistence(unittest.TestCase):
 
 
 class TestKernelLifecycle(unittest.TestCase):
-    def test_kernel_and_children_exit_when_its_backend_parent_dies(self):
-        """A kernel and every child it spawned must die when its host disappears.
-
-        The host can die without cleanup (SIGKILL/OOM/crash). Windows uses the
-        inherited SYNCHRONIZE handle; POSIX uses the inherited death pipe. The
-        child assertion closes the gap where the watchdog exited the kernel but
-        left a cell-spawned process behind.
-        """
+    def test_kernel_exits_when_its_backend_parent_dies(self):
+        """A kernel must not outlive the host that spawned it, even when the
+        host dies without cleanup (SIGKILL/OOM/crash). Windows: inherited
+        SYNCHRONIZE handle; POSIX: the kernel's group is registered with the
+        owner-death supervisor. Both are proven the same way — kill the host
+        mid-cell, the kernel is gone within seconds."""
         import psutil
 
         repo_root = str(Path(__file__).resolve().parents[2])
@@ -437,26 +435,6 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
             stale.proc.wait(timeout=10)
             self.assertFalse(stale.alive())
 
-    def test_boot_sweep_removes_old_orphans_but_preserves_live_kernel_dir(self):
-        import tools.code_kernel as code_kernel
-
-        with tempfile.TemporaryDirectory() as tempdir, patch.object(code_kernel.tempfile, "gettempdir", return_value=tempdir), _kernel_config(kernel_idle_timeout=1):
-            orphan = Path(tempdir, "hermes_kernel_orphan")
-            live = Path(tempdir, "hermes_kernel_live")
-            orphan.mkdir()
-            live.mkdir()
-
-            class Process:
-                info = {"cwd": "", "cmdline": [str(live)]}
-
-            with patch("psutil.process_iter", return_value=[Process()]):
-                old = time.time() - 3
-                os.utime(orphan, (old, old))
-                os.utime(live, (old, old))
-                _sweep_orphaned_kernel_dirs()
-            self.assertFalse(orphan.exists())
-            self.assertTrue(live.exists())
-
     def test_parallel_cells_share_one_kernel_process(self):
         """Parallel cells for one owner race the first spawn. Each racer
         used to see proc=None as 'dead', replace the registry entry, and
@@ -497,6 +475,22 @@ class TestKernelOwnershipAndLifecycle(unittest.TestCase):
         for proc in runners:
             proc.wait(timeout=10)
             self.assertIsNotNone(proc.returncode)
+
+
+class TestInScriptToolErrors(unittest.TestCase):
+    def test_ignored_helper_error_is_reported_for_that_cell_only(self):
+        """A script that drops a helper's {"error": ...} return must not read as a clean success."""
+        def _handle(tool_name, tool_args, task_id=None):
+            if tool_name == "write_file":
+                return json.dumps({"error": "Refusing to overwrite a.py: never read"})
+            return json.dumps({"ok": True})
+
+        with _kernel_config(), patch("model_tools.handle_function_call", new=_handle):
+            failed = _run("import hermes_tools\nhermes_tools.write_file('a.py', 'x')\nprint('done')\n")
+            clean = _run("import hermes_tools\nhermes_tools.web_search(query='q')\n")
+        self.assertEqual(failed["status"], "success", failed)
+        self.assertEqual(failed["tool_errors"], [{"tool": "write_file", "error": "Refusing to overwrite a.py: never read"}])
+        self.assertNotIn("tool_errors", clean)
 
 
 class TestPerCellRpcAuthority(unittest.TestCase):

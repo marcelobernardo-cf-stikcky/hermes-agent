@@ -93,6 +93,8 @@ export interface SessionSteerResponse {
 export interface SessionRedirectResponse {
   status?: 'redirected' | 'queued' | 'rejected'
   text?: string
+  /** TUI-26: the text was a bare stop phrase that ended the LOCAL voice chat; no turn saw it. */
+  voice_stopped?: boolean
 }
 
 export interface SessionTitleResponse {
@@ -171,13 +173,6 @@ export interface ClientSessionState {
   awaitingResponse: boolean
   streamId: string | null
   sawAssistantPayload: boolean
-  /** Identity of the turn currently open on this session, taken from the
-   *  gateway's `turn_id`. `seq` orders frames but spans turns, so payload from
-   *  an older turn delivered after the next `message.start` is otherwise
-   *  indistinguishable from live payload (reconnect replay, run supersession).
-   *  Null when the turn was opened by a gateway that does not stamp identity —
-   *  unknown identity must never be treated as a mismatch. */
-  liveTurnId: string | null
   /** This window picked up a turn it did not start — it resumed onto a session
    *  that was already running somewhere else (leaving HUD mode, opening a
    *  pop-out mid-turn). It therefore holds the reply but never received the
@@ -193,6 +188,9 @@ export interface ClientSessionState {
    *  heartbeat (#119569); when it lands it settles onto this bubble instead of
    *  appending a duplicate. Cleared by the next message.start or complete. */
   heartbeatSettledStreamId?: null | string
+  /** `turn_id` of the newest message.start (tui_gateway/stream_segments.py): a
+   *  re-sent start of the same turn is not a new occurrence. */
+  streamTurnId?: null | string
   /** A blocking clarify prompt is waiting on the user for this session. Drives
    *  the sidebar "needs input" indicator; cleared when the turn resumes/ends. */
   needsInput: boolean

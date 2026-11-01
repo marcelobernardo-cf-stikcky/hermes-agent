@@ -66,6 +66,33 @@ def test_events_since_returns_only_newer_frames_in_order():
     assert latest_seq("s1") == 5
 
 
+def test_replay_snapshot_is_detached_from_live_event_mutation():
+    frame = _frame("s1", "tool.complete")
+    frame["params"]["payload"] = {"result": "small"}
+    event_replay._stamp_event(frame)
+    retained = replay_stats()["bytes"]
+
+    # The transport/caller still owns the live frame after stamping. Mutating it must not
+    # rewrite or grow an already-admitted replay entry behind the byte-accounting budget.
+    frame["params"]["payload"]["result"] = "x" * 1_000_000
+
+    (replayed,) = events_since("s1", 0)
+    assert replayed["payload"]["result"] == "small"
+    assert replay_stats()["bytes"] == retained
+
+
+def test_each_replay_read_returns_an_independent_event_graph():
+    frame = _frame("s1", "tool.complete")
+    frame["params"]["payload"] = {"nested": {"value": "original"}}
+    event_replay._stamp_event(frame)
+
+    (first,) = events_since("s1", 0)
+    first["payload"]["nested"]["value"] = "caller-mutated"
+    (second,) = events_since("s1", 0)
+
+    assert second["payload"]["nested"]["value"] == "original"
+
+
 def test_events_since_returns_client_dispatchable_event_objects():
     """Cross-language contract: the client's replay loop dispatches an element
     only when it has a TOP-LEVEL ``type`` (json-rpc-gateway.ts fetchReplay:
@@ -108,6 +135,58 @@ def test_session_count_bounded_with_fifo_eviction():
     assert stats["sessions"] == event_replay._REPLAY_SESSIONS_MAX
     assert events_since("s0", 0) == []  # oldest session fully evicted
     assert latest_seq(f"s{event_replay._REPLAY_SESSIONS_MAX + 9}") == 1
+
+
+def test_fifo_eviction_keeps_seq_monotonic_within_epoch():
+    """#100122: FIFO eviction must not reset a revisited session's seq under
+    the same process-wide replay epoch — clients hold their old watermark, and
+    both the replay response and live parked frames with a reset (lower) seq
+    are silently dropped by the client's dispatchIfNewer gate."""
+    first = _frame("s0")
+    second = _frame("s0")
+    event_replay._stamp_event(first)
+    event_replay._stamp_event(second)
+    assert second["params"]["seq"] == 2
+
+    # Evict s0's ring by pushing _REPLAY_SESSIONS_MAX newer sessions through.
+    for index in range(1, event_replay._REPLAY_SESSIONS_MAX + 1):
+        event_replay._stamp_event(_frame(f"s{index}"))
+
+    assert "s0" not in event_replay._replay_buffers
+
+    revisited = _frame("s0")
+    event_replay._stamp_event(revisited)
+    # Same epoch (no restart happened): the revisited session CONTINUES its
+    # sequence instead of restarting at 1.
+    assert revisited["params"]["seq"] == 3
+
+    # A client holding the pre-eviction watermark still sees the new event…
+    assert [event["seq"] for event in events_since("s0", 2)] == [3]
+    # …while a client that saw only seq 1 is told the ring dropped what it
+    # missed (seq 2 went out live but is no longer replayable): truncated,
+    # refetch history.
+    assert event_replay.is_truncated("s0", 1)
+    # A client that saw seq 2 lost nothing: the ring resumes at 3 with no hole.
+    assert not event_replay.is_truncated("s0", 2)
+    assert not event_replay.is_truncated("s0", 3)
+
+
+def test_fifo_eviction_marks_truncation_for_old_watermarks():
+    """The whole retained ring is gone once a session is FIFO-evicted, so any
+    client watermark below its latest stamped seq reports truncation —
+    without the raise, a revisited session answers truncated=false and the
+    client trusts a tail with a hole in it (#100122)."""
+    frames = [_frame("s0") for _ in range(3)]
+    for f in frames:
+        event_replay._stamp_event(f)
+    assert latest_seq("s0") == 3
+
+    for index in range(1, event_replay._REPLAY_SESSIONS_MAX + 1):
+        event_replay._stamp_event(_frame(f"s{index}"))
+
+    assert event_replay.is_truncated("s0", 0)
+    assert event_replay.is_truncated("s0", 2)
+    assert not event_replay.is_truncated("s0", 3)  # saw everything before eviction
 
 
 def test_concurrent_stamping_never_drops_or_duplicates_seq():
@@ -219,102 +298,67 @@ def test_truncation_detection_semantics():
     assert not event_replay.is_truncated("nope", 0)
 
 
-# --- turn identity (turn_id) -------------------------------------------------
-# ``seq`` orders frames within a session but spans turns, so payload from an
-# older turn delivered after the next turn opened is indistinguishable from
-# live payload at the client edge. These cover the identity stamped alongside
-# seq in the same choke point.
+def test_forget_session_frees_the_ring_and_keeps_seq_and_gap_semantics():
+    for _ in range(3):
+        event_replay._stamp_event(_frame("gone"))
+    event_replay._stamp_event(_frame("kept"))
+    before = replay_stats()["bytes"]
+
+    event_replay.forget_session("gone")
+
+    assert replay_stats()["sessions"] == 1
+    assert 0 < replay_stats()["bytes"] < before
+    assert events_since("gone", 0) == []
+    assert latest_seq("gone") == 3  # numbering survives: a late frame continues at 4
+    assert event_replay.is_truncated("gone", 2)  # a client behind the drop must refetch
+    assert not event_replay.is_truncated("gone", 3)
+    late = _frame("gone")
+    event_replay._stamp_event(late)
+    assert late["params"]["seq"] == 4
+    assert len(events_since("kept", 0)) == 1
+    event_replay.forget_session("never-seen")  # frees nothing, raises nothing
 
 
-def test_turn_id_is_stable_across_a_turn_and_changes_on_next_start():
-    start1 = _frame("s1", "message.start")
-    delta1 = _frame("s1", "message.delta")
-    complete1 = _frame("s1", "message.complete")
-    start2 = _frame("s1", "message.start")
-    delta2 = _frame("s1", "message.delta")
+def test_a_frame_stamped_after_forget_does_not_rebuild_the_ring():
+    event_replay._stamp_event(_frame("closed"))
+    event_replay.forget_session("closed")
 
-    for f in (start1, delta1, complete1, start2, delta2):
-        event_replay._stamp_event(f)
+    late = _frame("closed")
+    late["params"]["payload"] = {"text": "x" * 100_000}
+    event_replay._stamp_event(late)
 
-    t1 = start1["params"]["payload"]["turn_id"]
-    assert delta1["params"]["payload"]["turn_id"] == t1
-    assert complete1["params"]["payload"]["turn_id"] == t1
-
-    t2 = start2["params"]["payload"]["turn_id"]
-    assert t2 != t1, "a new message.start must open a new turn identity"
-    assert delta2["params"]["payload"]["turn_id"] == t2
+    assert late["params"]["seq"] == 2  # numbering still advances
+    assert events_since("closed", 0) == []
+    assert replay_stats()["sessions"] == 0 and replay_stats()["bytes"] == 0
+    assert event_replay.is_truncated("closed", 1)  # a client holding seq 1 refetches
 
 
-def test_late_payload_keeps_the_closed_turn_id_not_the_new_one():
-    """The bug this identity exists for.
+def test_session_teardown_releases_the_replay_ring(monkeypatch):
+    from tui_gateway import session_lifecycle
 
-    A delta emitted by turn 1 after turn 2 already started must still carry
-    turn 1's id, so the renderer can reject it instead of applying it to the
-    new bubble.
-    """
-    start1 = _frame("s1", "message.start")
-    event_replay._stamp_event(start1)
-    t1 = start1["params"]["payload"]["turn_id"]
+    # The isolated-turn settle and full finalize need an agent/DB behind the dict; the subject is the ring.
+    monkeypatch.setattr(session_lifecycle, "_teardown_session", lambda session, end_reason="tui_close": None)
+    for _ in range(3):
+        event_replay._stamp_event(_frame("closed-sid"))
+    event_replay._stamp_event(_frame("live-sid"))
 
-    complete1 = _frame("s1", "message.complete")
-    event_replay._stamp_event(complete1)
+    assert session_lifecycle._teardown_popped_session({"_sid": "closed-sid"}, end_reason="tui_shutdown")
 
-    start2 = _frame("s1", "message.start")
-    event_replay._stamp_event(start2)
-    t2 = start2["params"]["payload"]["turn_id"]
-
-    # Turn 1's straggler, emitted with turn 1's identity already attached.
-    straggler = _frame("s1", "message.delta")
-    straggler["params"]["payload"]["turn_id"] = t1
-    event_replay._stamp_event(straggler)
-
-    assert straggler["params"]["payload"]["turn_id"] == t1
-    assert straggler["params"]["payload"]["turn_id"] != t2
+    assert events_since("closed-sid", 0) == []
+    assert event_replay.is_truncated("closed-sid", 0)
+    assert len(events_since("live-sid", 0)) == 1
 
 
-def test_replay_preserves_the_original_turn_id():
-    start = _frame("s1", "message.start")
-    delta = _frame("s1", "message.delta")
-    event_replay._stamp_event(start)
-    event_replay._stamp_event(delta)
-    original = delta["params"]["payload"]["turn_id"]
+def test_a_raising_teardown_still_releases_the_replay_ring(monkeypatch):
+    from tui_gateway import session_lifecycle
 
-    # A newer turn opens after the client dropped.
-    event_replay._stamp_event(_frame("s1", "message.start"))
+    def _boom(session, end_reason="tui_close"):
+        raise RuntimeError("finalize failed")
 
-    replayed = events_since("s1", 0)
-    replayed_deltas = [
-        e for e in replayed if e["type"] == "message.delta"
-    ]
-    assert replayed_deltas, "replay must return the buffered delta"
-    assert replayed_deltas[0]["payload"]["turn_id"] == original, (
-        "replay must reuse the original turn id, not relabel it as current"
-    )
+    monkeypatch.setattr(session_lifecycle, "_teardown_session", _boom)
+    event_replay._stamp_event(_frame("failed-sid"))
 
+    with pytest.raises(RuntimeError):
+        session_lifecycle._teardown_popped_session({"_sid": "failed-sid"}, end_reason="tui_shutdown")
 
-def test_turn_id_not_stamped_on_session_control_events():
-    event_replay._stamp_event(_frame("s1", "message.start"))
-    info = _frame("s1", "session.info")
-    event_replay._stamp_event(info)
-
-    assert "turn_id" not in info["params"]["payload"]
-
-
-def test_tool_events_inherit_the_live_turn_id():
-    start = _frame("s1", "message.start")
-    tool = _frame("s1", "tool.start")
-    event_replay._stamp_event(start)
-    event_replay._stamp_event(tool)
-
-    assert tool["params"]["payload"]["turn_id"] == start["params"]["payload"]["turn_id"]
-
-
-def test_payload_absent_gets_turn_id_without_crashing():
-    start = {
-        "jsonrpc": "2.0",
-        "method": "event",
-        "params": {"type": "message.start", "session_id": "s1"},
-    }
-    event_replay._stamp_event(start)
-
-    assert start["params"]["payload"]["turn_id"]
+    assert events_since("failed-sid", 0) == []

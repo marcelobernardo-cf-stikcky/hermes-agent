@@ -30,7 +30,7 @@ def _eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
 
 
-def _load_items(input_file: Optional[str]) -> List[Dict[str, Any]]:
+def _load_items(input_file: Optional[str]) -> list[dict[str, Any]]:
     if input_file:
         with open(input_file, encoding="utf-8-sig") as f:
             raw = f.read()
@@ -55,11 +55,11 @@ def _load_items(input_file: Optional[str]) -> List[Dict[str, Any]]:
     sys.exit(2)
 
 
-def _item_id(item: Dict[str, Any], index: int) -> str:
+def _item_id(item: dict[str, Any], index: int) -> str:
     return next((str(item[key]) for key in _ID_KEYS if item.get(key)), f"item-{index}")
 
 
-def _build_prompt(items: List[Dict[str, Any]], criteria: str) -> str:
+def _build_prompt(items: list[dict[str, Any]], criteria: str) -> str:
     lines = [
         "You score items for urgency against the user's criteria.",
         f"\nUSER IMPORTANCE CRITERIA:\n{criteria}\n",
@@ -93,7 +93,7 @@ def _as_score(value: Any) -> Optional[int]:
     return None
 
 
-def _parse_scores(content: str, n_items: int) -> Dict[int, Dict[str, Any]]:
+def _parse_scores(content: str, n_items: int) -> dict[int, dict[str, Any]]:
     text = (content or "").strip()
     # Tolerate accidental markdown fences.
     if text.startswith("```"):
