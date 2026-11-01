@@ -37,7 +37,7 @@ def test_backup_is_stepped_with_a_deadline_callback(tmp_path, monkeypatch):
         return real_connect(database, **kw)
 
     monkeypatch.setattr(bc.sqlite3, "connect", spy_connect)
-    assert bc._copy_auth_file(str(src), str(tmp_path / "out" / "Cookies")) is True
+    assert bc._copy_auth_file(str(src), str(tmp_path / "out" / "Cookies")) is None  # None = copied
     assert seen, "backup() was never called"
     assert isinstance(seen[0].get("pages"), int) and seen[0]["pages"] > 0, (
         "unstepped backup cannot be interrupted")

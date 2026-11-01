@@ -7,6 +7,8 @@ sao o que separa o filtro correto de um que engole notificacao boa.
 """
 import pytest
 
+from hermes_cli import kanban_db_notify as kbn
+
 
 @pytest.fixture()
 def board(tmp_path, monkeypatch):
@@ -32,7 +34,7 @@ def _claim(kb, conn, title):
 
 
 def _drain(kb, conn, task_id, chat_id):
-    cursor, events = kb.claim_unseen_events_for_sub(
+    cursor, events = kbn.claim_unseen_events_for_sub(
         conn, task_id=task_id, platform="api_server", chat_id=chat_id)[1:]
     return cursor, {e.kind for e in events}
 
@@ -40,7 +42,7 @@ def _drain(kb, conn, task_id, chat_id):
 def test_superseded_run_is_dropped_and_cursor_still_advances(board):
     kb, conn = board
     task_id, stale_run = _claim(kb, conn, "superseded run")
-    kb.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id="c1")
+    kbn.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id="c1")
 
     live_run = int(conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, started_at) VALUES (?,?,?,?)",
@@ -65,7 +67,7 @@ def test_finished_task_still_delivers_its_last_wake(board):
     """`current_run_id` NULL nao pode virar filtro: e o estado de quem terminou."""
     kb, conn = board
     task_id, run_id = _claim(kb, conn, "done clears run")
-    kb.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id="c2")
+    kbn.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id="c2")
     conn.execute("UPDATE tasks SET status='done', current_run_id=NULL WHERE id=?",
                  (task_id,))
     conn.commit()
@@ -78,7 +80,7 @@ def test_event_without_run_id_is_never_filtered(board):
     """`created`/`commented` nascem sem run e valem para qualquer tentativa."""
     kb, conn = board
     task_id = kb.create_task(conn, title="no run id", assignee="rigger")
-    kb.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id="c3")
+    kbn.add_notify_sub(conn, task_id=task_id, platform="api_server", chat_id="c3")
     kb._append_event(conn, task_id, "commented", {"x": 1}, run_id=None)
     conn.execute("UPDATE tasks SET current_run_id=99 WHERE id=?", (task_id,))
     conn.commit()

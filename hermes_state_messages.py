@@ -30,6 +30,21 @@ from hermes_state_identity import (
 
 logger = logging.getLogger("hermes_state")  # caplog tests pin the origin module's name
 
+# tui_gateway.session_history._build_image_ref_message's model-only prefix, one block per attached image.
+_IMAGE_HINT_RE = re.compile(r"\[The user attached an image: [^\]\n]*\]\n\[Examine it with the vision_analyze tool using "
+                            r"image_url: ([^\n]*)\](?:\n\n|$)")
+
+
+def _is_image_hint_view(live: Any, durable: Any) -> bool:
+    """Is *live* the model view of the durable ``@image:`` row *durable*: image_url hints, then the user's exact
+    words, then optionally injected context? A merge or supersede changes the words and never matches."""
+    if not (isinstance(live, str) and isinstance(durable, str)) or "@image:" not in durable or not _IMAGE_HINT_RE.match(live):
+        return False
+    words = _IMAGE_HINT_RE.sub("", live).strip()
+    durable_words = "\n".join(line for line in durable.split("\n") if not line.startswith("@image:")).strip()
+    return words == durable_words or words.startswith(durable_words + "\n\n")
+
+
 # One INSERT shape for every message writer (append, batch, replace, compact, import).
 _INSERT_MESSAGE_SQL = """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
@@ -674,8 +689,19 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             # the live dict never disagree. Tool calls get their per-occurrence ids the same way.
             stamp_message_uid(msg)
             self._stamp_tool_call_uids(msg, tool_calls, batch_tool_index)
+            row_msg = msg
+            origin_id = msg.get("_row_id")
+            if role == "user" and isinstance(origin_id, int) and not msg.get("_compressed_summary") \
+                    and isinstance(msg.get("content"), str) and _IMAGE_HINT_RE.match(msg["content"]):
+                origin = conn.execute("SELECT content FROM messages WHERE id = ? AND session_id = ? AND role = 'user'",
+                                      (origin_id, session_id)).fetchone()
+                durable = self._decode_content(origin[0]) if origin else None
+                if _is_image_hint_view(msg["content"], durable):
+                    # A carried image turn: the live dict holds the model view (image_url hint), the durable row what
+                    # the user wrote (@image:). Keep the durable text; the live bytes become the api_content sidecar.
+                    row_msg = {**msg, "content": durable, "api_content": msg.get("api_content") or msg["content"]}
             cur = conn.execute(_INSERT_MESSAGE_SQL, self._message_row_params(
-                session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
+                session_id, role, row_msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
             # Keep the caller's live row aligned with the durable identity. Rows created without an explicit
             # timestamp (notably mid-turn steers) may be carried through several compaction generations; if
             # the generated timestamp exists only in SQLite, every copy receives a new identity and renders
@@ -887,7 +913,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         # durable row's timestamp so display dedupe still collapses generations. Donors are active-only;
         # the rewound/archived originals above never donate, so this is a no-op for a clean compaction.
         self._carry_parent_timestamps(conn, session_id, compacted_messages)
+        slots = self._reserve_display_slots(conn, session_id, compacted_messages)
         inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
+        self._pin_display_slots(conn, compacted_messages, slots)
         if clone_ids:
             _ids, unseen_tool_calls = self._tail_rows_after_watermark(
                 conn,
@@ -1022,7 +1050,9 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         # durable row's timestamp so display dedupe still collapses generations. Donors are active-only;
         # the rewound/archived originals above never donate, so this is a no-op for a clean compaction.
         self._carry_parent_timestamps(conn, session_id, compacted_messages)
+        slots = self._reserve_display_slots(conn, session_id, compacted_messages)
         inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
+        self._pin_display_slots(conn, compacted_messages, slots)
         if clone_ids:
             self._clone_message_rows(conn, clone_ids)
             inserted += len(clone_ids)
@@ -1123,12 +1153,14 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         """The display identity both display reads give *row*, scanning rows in ``id`` order.
 
         A compaction carrier keeps its message's ``message_uid`` but not its content (the prior tail
-        wrapped around the summary), so it is a copy of the first row with that uid: shown once."""
+        wrapped around the summary), so it is a copy of the first row with that uid: shown once. So is a
+        user row whose text compaction rewrote. Other rewritten copies (a pruned tool stub) keep their own key."""
         uid = row["message_uid"]
         if not uid:
             return key
-        if row["_compressed_summary"]:
-            return first_by_uid.get(uid, key)
+        if row["_compressed_summary"] or row["role"] == "user":
+            # A user row compaction rewrote (merged queued turns) is the same message: it takes its first slot.
+            return first_by_uid.setdefault(uid, key)
         first_by_uid.setdefault(uid, key)
         return key
 
@@ -1186,6 +1218,56 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         if drop_removed:
             keys = [key for key in keys if not any(removed[copy] for copy in identities[key])]
         return [seen[key] for key in keys]
+
+    def _reserve_display_slots(self, conn, session_id: str, compacted_messages: list[dict[str, Any]]) -> tuple[list[Optional[int]], list[Optional[int]]]:
+        """(slot, origin slot) per compacted message, read BEFORE insert (``_row_id`` still names the origin).
+
+        Fresh rows (summary, nudge, merged carrier) get a slot just before the earliest carried
+        origin after them; later rows shift to make room. Without this a fresh row sorts after the whole
+        carried tail on every reload, hundreds of rows below its turn."""
+        origins: list[Optional[int]] = []
+        for msg in compacted_messages:
+            origin_id, row = msg.get("_row_id"), None
+            if isinstance(origin_id, int) and not isinstance(origin_id, bool):
+                row = conn.execute("SELECT COALESCE(display_order, id) FROM messages WHERE id = ? AND session_id = ?",
+                                   (origin_id, session_id)).fetchone()
+            origins.append(None if row is None else row[0])
+        groups: dict[int, list[int]] = {}  # boundary (smallest carried slot after it) -> fresh indexes
+        running: Optional[int] = None
+        for index in range(len(origins) - 1, -1, -1):
+            if origins[index] is not None:
+                running = origins[index] if running is None else min(running, origins[index])
+            elif running is not None:
+                groups.setdefault(running, []).insert(0, index)
+        slots = list(origins)
+        # Final slot of an existing order x is x + (slots reserved at boundaries <= x); shift highest first.
+        for boundary in sorted(groups, reverse=True):
+            conn.execute("UPDATE messages SET display_order = display_order + ? WHERE session_id = ? AND display_order >= ?",
+                         (len(groups[boundary]), session_id, boundary))
+        for index, origin in enumerate(origins):
+            if origin is not None:
+                slots[index] = origin + sum(len(v) for b, v in groups.items() if b <= origin)
+        shifted = 0
+        for boundary in sorted(groups):
+            for offset, index in enumerate(groups[boundary]):
+                slots[index] = boundary + shifted + offset
+            shifted += len(groups[boundary])
+        return slots, origins
+
+    def _pin_display_slots(self, conn, compacted_messages: list[dict[str, Any]],
+                           reserved: tuple[list[Optional[int]], list[Optional[int]]]) -> None:
+        """Store the reserved slots on the FRESH rows just inserted for *compacted_messages* (``_row_id`` now names
+        the new row), with the row's own identity so :meth:`_reconcile_display_orders` keeps the slot."""
+        slots, origins = reserved
+        for msg, slot, origin in zip(compacted_messages, slots, origins):
+            row_id = msg.get("_row_id")
+            if slot is None or origin is not None or not isinstance(row_id, int):
+                continue  # carried copies take their origin's slot through the identity fold
+            row = conn.execute("SELECT role, content, timestamp, tool_call_id, tool_calls, tool_name, display_kind, "
+                               "display_metadata, message_uid, tool_call_uid FROM messages WHERE id = ?", (row_id,)).fetchone()
+            if row is not None:
+                conn.execute("UPDATE messages SET display_order = ?, display_identity = ? WHERE id = ?",
+                             (slot, self._display_identity(self._display_dedupe_key(row)), row_id))
 
     def _reconcile_display_orders(self, conn, session_id: str) -> None:
         """Re-fold split display generations by the recomputed display key.
@@ -1257,13 +1339,20 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
                     ("idx_messages_session_id",),
                 ).fetchone() is not None
                 index_hint = "INDEXED BY idx_messages_session_id" if has_session_index else "NOT INDEXED"
+                # Same "a compacted tool result paints once" rule as the indexed read; tool rows only, no bodies.
+                has_slots = {"message_uid", "display_order", "compacted"} <= {
+                    r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+                later_copies = later_tool_copy_ids(self, conn.execute(
+                    "SELECT id, session_id, role, message_uid, timestamp, active, compacted, display_order, "
+                    f"display_metadata FROM messages {index_hint} "
+                    f"WHERE session_id = ? AND role = 'tool'{active_clause}", (session_id,)).fetchall()) if has_slots else set()
                 rows = conn.execute(
                     "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, active, "
                     f"display_kind, display_metadata FROM messages {index_hint} "
                     f"WHERE session_id = ?{active_clause} ORDER BY id ASC",
                     (session_id,))
                 for row in rows:
-                    if self._is_model_only_row(row):
+                    if self._is_model_only_row(row) or row["id"] in later_copies:
                         continue
                     identity = self._display_identity(self._display_dedupe_key(row))
                     current = representatives.get(identity)

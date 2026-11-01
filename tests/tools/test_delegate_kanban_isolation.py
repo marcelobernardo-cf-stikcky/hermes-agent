@@ -277,7 +277,8 @@ def test_shared_local_snapshot_does_not_promote_child_identity_to_parent(
             child = env.execute(
                 "printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\""
             )
-            assert child["output"] == "1"
+            # Upstream stores the fenced board root (``"1"`` only when unresolvable).
+            assert child["output"]
 
         parent_again = env.execute(
             "printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\""
@@ -288,7 +289,7 @@ def test_shared_local_snapshot_does_not_promote_child_identity_to_parent(
             child_again = env.execute(
                 "printf '%s' \"${HERMES_DELEGATED_CHILD_CONTEXT-}\""
             )
-            assert child_again["output"] == "1"
+            assert child_again["output"]
     finally:
         env.cleanup()
 

@@ -1839,8 +1839,12 @@ def start() -> None:
     elif task_installed:
         reconcile_scheduled_task(get_task_name())   # like systemd's regenerate-on-stale before a start
 
-    # Manual starts use the same console-less direct spawn as restart() and install --start-now;
-    # Scheduled Task / Startup entries are only login persistence.
+    # A persistent login mechanism owns the VBS supervisor: manual starts use the same owner so a crash is
+    # recovered during the current session too. Otherwise the console-less direct spawn, like restart().
+    if task_installed or startup_installed:
+        pid = _spawn_supervised()
+        _report_gateway_start(f"VBS supervisor (PID {pid})")
+        return
     _spawn_detached()
     _report_gateway_start("direct spawn")
 

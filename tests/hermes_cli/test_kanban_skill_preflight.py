@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_diagnostics as kd
 
 
@@ -19,6 +21,7 @@ def profile_homes(tmp_path, monkeypatch):
     assignee_home = profiles / "exhibitionist"
     assignee_home.mkdir(parents=True)
     (assignee_home / "skills").mkdir()
+    (assignee_home / "config.yaml").write_text("{}\n", encoding="utf-8")  # identity marker
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(root))
     kb.init_db()
@@ -45,7 +48,7 @@ def test_preflight_uses_assignee_home_not_default_home(profile_homes):
 
 
 def test_create_task_rejects_missing_skill_before_insert(profile_homes):
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         with pytest.raises(ValueError, match="not available in assignee profile"):
             kb.create_task(
                 conn,
@@ -59,7 +62,7 @@ def test_create_task_rejects_missing_skill_before_insert(profile_homes):
 def test_dispatch_skips_missing_skill_without_run_or_failure(profile_homes):
     root, assignee_home = profile_homes
     _skill(assignee_home, "present-then-removed")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task_id = kb.create_task(
             conn,
             title="preflight me",
@@ -68,7 +71,7 @@ def test_dispatch_skips_missing_skill_without_run_or_failure(profile_homes):
         )
         (assignee_home / "skills" / "present-then-removed" / "SKILL.md").unlink()
 
-        result = kb.dispatch_once(conn, spawn_fn=lambda *_args: pytest.fail("spawned"))
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *_args: pytest.fail("spawned"))
         task = kb.get_task(conn, task_id)
 
         assert result.skipped_unknown_skill == [(task_id, ["present-then-removed"])]
@@ -80,14 +83,14 @@ def test_dispatch_skips_missing_skill_without_run_or_failure(profile_homes):
 def test_existing_assignee_skill_spawns_normally(profile_homes):
     _, assignee_home = profile_homes
     _skill(assignee_home, "worker-skill")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task_id = kb.create_task(
             conn,
             title="spawn me",
             assignee="exhibitionist",
             skills=["worker-skill"],
         )
-        result = kb.dispatch_once(conn, spawn_fn=lambda *_args: 12345)
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *_args: 12345)
 
         assert [entry[0] for entry in result.spawned] == [task_id]
         task = kb.get_task(conn, task_id)
@@ -98,7 +101,7 @@ def test_existing_assignee_skill_spawns_normally(profile_homes):
 def test_unknown_skill_is_visible_in_diagnostics(profile_homes):
     root, _ = profile_homes
     _skill(root, "default-only")
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         task_id = kb.create_task(
             conn,
             title="diagnose me",

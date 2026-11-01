@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 
 
@@ -60,7 +61,7 @@ def test_iteration_budget_timeout_parks_blocked_with_no_respawn(
     kanban_home, all_assignees_spawnable,
 ):
     """Worker exhausts N/N iterations → blocked, 0 automatic respawn."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _claimed(conn)
         tripped = _iteration_timeout(conn, tid, failure_limit=2)
@@ -82,7 +83,7 @@ def test_iteration_budget_timeout_parks_blocked_with_no_respawn(
         assert kb.recompute_ready(conn) == 0
         assert kb.get_task(conn, tid).status == "blocked"
 
-        result = kb.dispatch_once(conn, spawn_fn=lambda *a, **k: 4242)
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 4242)
         assert not any(row[0] == tid for row in result.spawned)
         assert kb.get_task(conn, tid).status == "blocked"
     finally:
@@ -91,7 +92,7 @@ def test_iteration_budget_timeout_parks_blocked_with_no_respawn(
 
 def test_iteration_budget_timeout_still_counts_toward_breaker(kanban_home):
     """Crash then iteration-budget timeout still trips the circuit breaker."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _claimed(conn)
         crashed = kbd._record_task_failure(
@@ -122,7 +123,7 @@ def test_iteration_budget_timeout_still_counts_toward_breaker(kanban_home):
 
 def test_isolated_crash_still_retries(kanban_home, all_assignees_spawnable):
     """A single crash returns to ready and the dispatcher may respawn."""
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _claimed(conn)
         crashed = kbd._record_task_failure(
@@ -135,7 +136,7 @@ def test_isolated_crash_still_retries(kanban_home, all_assignees_spawnable):
         assert task.status == "ready"
         assert task.consecutive_failures == 1
 
-        result = kb.dispatch_once(conn, spawn_fn=lambda *a, **k: 4243)
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 4243)
         assert any(row[0] == tid for row in result.spawned)
         assert kb.get_task(conn, tid).status == "running"
     finally:
@@ -147,7 +148,7 @@ def test_wall_clock_timeout_retries_and_labels_reason(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
     killed = []
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn, title="wall clock job", assignee="worker", max_runtime_seconds=1,
@@ -165,7 +166,7 @@ def test_wall_clock_timeout_retries_and_labels_reason(kanban_home, monkeypatch):
                 (old_started, tid),
             )
 
-        timed_out = kb.enforce_max_runtime(
+        timed_out = kbd.enforce_max_runtime(
             conn, signal_fn=lambda pid, sig: killed.append((pid, sig)),
         )
         assert tid in timed_out
@@ -187,7 +188,7 @@ def test_record_kanban_budget_exhausted_holds_real_card(kanban_home):
 
     from agent.turn_finalizer import _record_kanban_budget_exhausted
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _claimed(conn)
     finally:
@@ -197,7 +198,7 @@ def test_record_kanban_budget_exhausted_holds_real_card(kanban_home):
         tid, 90, 90, logging.getLogger("test.iteration_budget_hold"),
     )
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
@@ -225,7 +226,7 @@ def test_stale_worker_iteration_timeout_does_not_clobber_successor_run(
 
     from agent.turn_finalizer import _record_kanban_budget_exhausted
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = _claimed(conn)
         task_after_a_claim = kb.get_task(conn, tid)
@@ -255,7 +256,7 @@ def test_stale_worker_iteration_timeout_does_not_clobber_successor_run(
         tid, 90, 90, logging.getLogger("test.iteration_budget_hold.stale"),
     )
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         task = kb.get_task(conn, tid)
         # B's claim must be intact — untouched by A's stale mutation.

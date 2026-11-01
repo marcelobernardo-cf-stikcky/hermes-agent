@@ -1921,12 +1921,10 @@ def _fallback_chain_exhausted(agent, reason: FailoverReason | None) -> bool:
         raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
         try:
             from hermes_cli import kanban_db
-            conn = kanban_db.connect(board=os.environ.get("HERMES_KANBAN_BOARD") or None)
-            try:
+            from hermes_cli.kanban_db_connect import connect_closing
+            with connect_closing(board=os.environ.get("HERMES_KANBAN_BOARD") or None) as conn:
                 kanban_db.block_task(conn, task_id, reason="all fallback providers are reserved",
                                      kind="capability", expected_run_id=int(raw_run_id) if raw_run_id else None)
-            finally:
-                conn.close()
         except Exception:
             logger.debug("Failed to block worker after provider collisions", exc_info=True)
     if agent._fallback_chain and reason not in _RATE_LIMIT_FAILOVER_REASONS:

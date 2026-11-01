@@ -10,6 +10,7 @@ import pytest
 
 from agent.error_classifier import FailoverReason
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from run_agent import AIAgent
 
@@ -26,13 +27,13 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _make_agent(fallback_model):
     with (
-        patch("run_agent.get_tool_definitions", return_value=[]),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
     ):
         agent = AIAgent(
             api_key="test-key",
-            base_url="https://api.anthropic.com",
+            base_url="https://openrouter.ai/api/v1",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
@@ -44,7 +45,7 @@ def _make_agent(fallback_model):
 
 
 def _claim_overridden_task(monkeypatch: pytest.MonkeyPatch) -> tuple[str, int]:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
             title="fallback collision",
@@ -115,7 +116,7 @@ def test_reserved_openai_codex_is_skipped_before_client_resolution(
 
     assert resolve_client.call_count == 1
     assert resolve_client.call_args.args[0] == "zai"
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
         assert task is not None
         assert task.status == "running"
@@ -144,7 +145,7 @@ def test_all_reserved_fallbacks_block_the_worker_task(
         assert agent._try_activate_fallback(reason=FailoverReason.rate_limit) is False
 
     resolve_client.assert_not_called()
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
         assert task is not None
         assert task.status == "blocked"

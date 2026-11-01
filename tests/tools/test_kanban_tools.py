@@ -12,6 +12,8 @@ import json
 
 import pytest
 
+from hermes_cli import kanban_db_connect as kbc
+
 
 # ---------------------------------------------------------------------------
 # Gating
@@ -213,7 +215,7 @@ def test_complete_rejects_self_approved_review(monkeypatch, worker_env):
     from tools import kanban_tools as kt
 
     tid = worker_env
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         implementation = kb.get_task(conn, tid)
         assert kb.request_review(
@@ -231,7 +233,7 @@ def test_complete_rejects_self_approved_review(monkeypatch, worker_env):
     assert out.get("error")
     assert "self-approve" in out["error"]
 
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         unchanged = kb.get_task(conn, tid)
         assert unchanged.status == "running"
@@ -504,7 +506,7 @@ def test_request_review_goal_mode_allows_when_judge_rate_limited(monkeypatch, tm
 
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn, title="goal-mode-review-rl", assignee="test-worker",
@@ -537,7 +539,7 @@ def test_request_review_goal_mode_allows_when_judge_rate_limited(monkeypatch, tm
     assert d.get("status") == "review"
     assert calls["n"] == 1, "judge must be consulted once, never retried in-gate"
 
-    conn2 = kb.connect()
+    conn2 = kbc.connect()
     try:
         task = kb.get_task(conn2, tid)
         assert task.status == "review"
@@ -564,7 +566,7 @@ def test_complete_goal_mode_allows_when_judge_rate_limited(monkeypatch, tmp_path
 
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
-    conn = kb.connect()
+    conn = kbc.connect()
     try:
         tid = kb.create_task(
             conn, title="goal-mode-complete-rl", assignee="test-worker",
@@ -588,7 +590,7 @@ def test_complete_goal_mode_allows_when_judge_rate_limited(monkeypatch, tmp_path
     assert "error" not in d, d
     assert d.get("ok") is True
 
-    conn2 = kb.connect()
+    conn2 = kbc.connect()
     try:
         task = kb.get_task(conn2, tid)
         assert task.status == "done"

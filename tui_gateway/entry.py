@@ -15,6 +15,7 @@ import time
 import traceback
 from contextlib import suppress
 
+from hermes_cli.process_identity import attach_self_to_kill_on_close_job
 from tui_gateway._env import env_float
 from tui_gateway._stdin_recovery import handle_spurious_eof
 
@@ -338,6 +339,8 @@ def _serve():
     except Exception:
         logger.warning("TUI message injector did not install", exc_info=True)
     _close_rpc_stdin_on_exec()
+    # The stdio/Desktop backend is a process root; inherited shell trees must die with it.
+    attach_self_to_kill_on_close_job()
     _install_sidecar_publisher()
     from hermes_cli.observability.shared_metrics_process import begin_process
 

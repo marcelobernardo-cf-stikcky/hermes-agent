@@ -320,7 +320,7 @@ def test_enforce_max_runtime_applies_default_when_card_has_no_limit(kanban_home)
     original_alive = _kb._pid_alive
     _kb._pid_alive = lambda pid: False
     try:
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             tid = kb.create_task(conn, title="unbounded job", assignee="worker")
             assert kb.get_task(conn, tid).max_runtime_seconds is None
@@ -336,17 +336,17 @@ def test_enforce_max_runtime_applies_default_when_card_has_no_limit(kanban_home)
                 )
 
             # Default larger than elapsed: nothing happens.
-            assert kb.enforce_max_runtime(
+            assert kbd.enforce_max_runtime(
                 conn, signal_fn=lambda p, s: killed.append(p), default_max_runtime_seconds=600,
             ) == []
             # 0 = legacy behaviour, no ceiling.
-            assert kb.enforce_max_runtime(
+            assert kbd.enforce_max_runtime(
                 conn, signal_fn=lambda p, s: killed.append(p), default_max_runtime_seconds=0,
             ) == []
             assert killed == []
 
             # Default smaller than elapsed: worker is terminated.
-            timed_out = kb.enforce_max_runtime(
+            timed_out = kbd.enforce_max_runtime(
                 conn, signal_fn=lambda p, s: killed.append(p), default_max_runtime_seconds=60,
             )
             assert timed_out == [tid]

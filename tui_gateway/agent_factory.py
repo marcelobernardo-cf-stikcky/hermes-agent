@@ -503,9 +503,13 @@ def _tool_lifecycle_required_for_ui(name: str) -> bool:
     consent surfaces, image_generate / manage_catalog / delegate_task draw the
     thing the user asked for, and file edits are the diff the user reviews.
     The start and complete guards both consult this set, so a card's
-    `tool.complete` can never arrive without its `tool.start`.
+    `tool.complete` can never arrive without its `tool.start`. Todo tools are
+    application state (complete is already force-emitted for them), so their
+    start must be too or the Tasks panel only moves on completion.
     """
-    return name in _TOOL_LIFECYCLE_UI_TOOLS
+    from tools.todo_tool import is_todo_tool_name
+
+    return name in _TOOL_LIFECYCLE_UI_TOOLS or is_todo_tool_name(name)
 
 def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _RuntimeFallbackResolution:
     """Resolve the primary runtime or one complete provider/model fallback. Provider-only fallback entries

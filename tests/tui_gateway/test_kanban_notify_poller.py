@@ -63,7 +63,7 @@ class TestCollectKanbanNotifications:
         this poller did not claim the kind — the Desktop session never woke.
         """
         tid = _create_subscribed_task()
-        conn = kb.connect()
+        conn = kbc.connect()
         try:
             kb.claim_task(conn, tid)
             assert kb.request_review(

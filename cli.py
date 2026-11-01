@@ -1288,7 +1288,11 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
                 result = resolve_plugin_command_result(invoke_plugin_command(
                     plugin_handler, user_args, source=None, session_id=session_id, session_key=session_id,
                     platform="cli"))
-            if result:
+            # A plugin may start an agent turn instead of printing: {"type": "send", "message": "..."}.
+            if (isinstance(result, dict) and result.get("type") == "send" and isinstance(result.get("message"), str)
+                    and result["message"].strip() and hasattr(self, "_pending_input")):
+                self._pending_input.put(result["message"])
+            elif result:
                 _cprint(str(result))
         except Exception as e:
             _cprint(f"\033[1;31m{_t('cli.plugin.command_error', error=str(e))}{_RST}")

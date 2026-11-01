@@ -767,7 +767,9 @@ def _reconcile_display_with_live(db_display: list[dict], in_memory: list[dict]) 
         last_shared = _legacy_display_anchor(db_display, in_memory)
     if last_shared == -1:
         return db_display  # DB tail not in memory (DB ahead, or diverged) — trust it over duplicating
-    return list(db_display) + list(in_memory[last_shared + 1 :])
+    # Compaction can reorder the live copy: a tail row already persisted in the display (same durable id) is not new.
+    shown = set().union(*map(_durable_ids, db_display))
+    return list(db_display) + [msg for msg in in_memory[last_shared + 1 :] if not _durable_ids(msg) & shown]
 
 
 def _live_visible_history(session: dict, db, in_memory_fallback: list[dict]) -> list[dict]:

@@ -356,7 +356,7 @@ def test_goal_mode_review_handoff_allows_when_judge_rate_limited(
     kb._INITIALIZED_PATHS.clear()
     kb.init_db()
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tool_task = kb.create_task(
             conn,
             title="Goal-mode tool task (rl)",
@@ -385,7 +385,7 @@ def test_goal_mode_review_handoff_allows_when_judge_rate_limited(
     accepted = json.loads(tools._handle_request_review({"summary": "Looks ready."}))
     assert accepted.get("ok") is True
     assert "error" not in accepted
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         tool_after = kb.get_task(conn, tool_task)
         assert tool_after is not None
         assert tool_after.status == "review"
@@ -394,7 +394,7 @@ def test_goal_mode_review_handoff_allows_when_judge_rate_limited(
         assert run.metadata is not None
         assert run.metadata.get("judge_unavailable") is True
 
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         cli_task = kb.create_task(
             conn,
             title="Goal-mode CLI task (rl)",
@@ -428,7 +428,7 @@ def test_goal_mode_review_handoff_allows_when_judge_rate_limited(
     output = kc.run_slash(f"request-review {cli_task} --summary 'Looks ready.'")
     assert "rejected by judge" not in output
     assert "Requested review" in output
-    with kb.connect() as conn:
+    with kbc.connect() as conn:
         cli_after = kb.get_task(conn, cli_task)
         assert cli_after is not None
         assert cli_after.status == "review"
