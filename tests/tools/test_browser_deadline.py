@@ -1,85 +1,17 @@
-"""Regression: browser_exec bounds the WHOLE call, not just the CLI subprocess.
+"""Regression: a probe subprocess stays bounded when a descendant holds its pipes.
 
-Two holes were proven on this Windows Python before the fix
-(scratch/browser-timeout-diagnosis.md):
-  1. setup (_route_backend -> real-profile stale close / snapshot / launch)
-     ran BEFORE any timeout was established, so a slow setup added unbounded
-     wall-clock on top of timeout_s. Observed: a 45s call returned at 420s.
-  2. subprocess.run(timeout=) is not bounded on Windows when a descendant
-     inherits the captured pipes: run() kills only the direct child then
-     joins reader threads forever. Measured: 0.3s requested -> 4.11s.
+subprocess.run(timeout=) is not bounded on Windows when a descendant inherits
+the captured pipes: run() kills only the direct child then joins reader threads
+forever. Measured: 0.3s requested -> 4.11s.
 
-Both assert on observable behaviour (elapsed time / which timeout the CLI
-subprocess receives), never on log text.
+The fork's setup-deadline tests (_route_backend(deadline=)) were retired after
+the upstream merge: upstream bounds each setup step itself (SQLite auth backup
+deadline, 58d6d5223a) and browser_exec kills the CLI's whole process group on
+timeout (_run_cli_killing_process_group, #106244).
 """
 from __future__ import annotations
 
-import subprocess
 import time
-
-from tools import browser_use_cli as bu
-
-
-def test_slow_setup_shrinks_the_cli_timeout(monkeypatch):
-    """Setup spend must come OUT of timeout_s, not be added on top of it."""
-    seen: dict = {}
-    setup_cost = 2.0
-
-    def slow_route(env, session, task_id, local, deadline=None):
-        assert deadline is not None, "browser_exec must set the deadline BEFORE setup"
-        time.sleep(setup_cost)
-        return None
-
-    def fake_run(cmd, **kwargs):
-        seen["timeout"] = kwargs.get("timeout")
-        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(bu, "_find_cli", lambda: ["browser-use"])
-    monkeypatch.setattr(bu, "_route_backend", slow_route)
-    monkeypatch.setattr(bu.subprocess, "run", fake_run)
-
-    budget = 8
-    bu.browser_exec("print(1)", timeout_s=budget)
-
-    # RED (setup outside the budget): timeout == budget, total could reach
-    # budget + setup_cost. GREEN: the CLI gets only what setup left over.
-    assert seen["timeout"] <= budget - setup_cost + 0.5, (
-        f"CLI timeout {seen['timeout']!r} did not absorb the "
-        f"{setup_cost}s setup out of the {budget}s budget"
-    )
-
-
-def test_setup_that_ate_the_budget_still_bounds_the_cli_call(monkeypatch):
-    """Deliberate design: a spent budget floors at _MIN_TIMEOUT_S, never unbounded.
-
-    The floor exists so a slow-but-SUCCESSFUL setup still gets a workable call
-    instead of an instant, confusing timeout. What must not happen is the CLI
-    receiving the full timeout_s again (setup billed twice) or no timeout at all.
-    """
-    seen: dict = {}
-
-    def exhausting_route(env, session, task_id, local, deadline=None):
-        while deadline is not None and deadline - time.monotonic() > 0:
-            time.sleep(0.05)
-        return None
-
-    def fake_run(cmd, **kwargs):
-        seen["timeout"] = kwargs.get("timeout")
-        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(bu, "_find_cli", lambda: ["browser-use"])
-    monkeypatch.setattr(bu, "_route_backend", exhausting_route)
-    monkeypatch.setattr(bu.subprocess, "run", fake_run)
-
-    budget = bu._MIN_TIMEOUT_S * 3
-    bu.browser_exec("print(1)", timeout_s=budget)
-
-    assert seen["timeout"] is not None, "the CLI must always get a timeout"
-    assert seen["timeout"] == bu._MIN_TIMEOUT_S, (
-        f"expected the {bu._MIN_TIMEOUT_S}s floor after setup spent the budget, "
-        f"got {seen['timeout']!r}"
-    )
-    assert seen["timeout"] < budget, "setup spend must not be billed twice"
 
 
 def test_bounded_probe_run_returns_despite_pipe_holding_descendant():
