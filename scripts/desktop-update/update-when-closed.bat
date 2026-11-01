@@ -36,6 +36,12 @@ if errorlevel 1 (
 for /f "delims=" %%S in ('git -C "%INSTALL_ROOT%" rev-parse --short HEAD') do set "ROLLBACK_SHA=%%S"
 
 echo [1/4] Fechando o Hermes (ate %GRACE_SECONDS%s com calma, depois forcado)...
+rem The Tailscale serve loop (serve-remote.cmd) respawns hermes.exe 15s after it dies,
+rem i.e. mid-update: stop the loop first and restart it at the end if it was running.
+set "SERVE_REMOTE_VBS=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\hermes-serve-remote.vbs"
+set "SERVE_REMOTE_WAS_RUNNING="
+for /f %%C in ('powershell.exe -NoProfile -NonInteractive -Command "$l=@(Get-CimInstance Win32_Process | ? { $_.Name -eq 'cmd.exe' -and $_.CommandLine -like '*serve-remote.cmd*' }); $l | %% { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $l.Count"') do if not "%%C"=="0" set "SERVE_REMOTE_WAS_RUNNING=1"
+if defined SERVE_REMOTE_WAS_RUNNING echo   loop serve-remote (Tailscale) pausado; volta no fim.
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ^
   "$n=@('Hermes','hermes'); Get-Process -Name 'Hermes' -ErrorAction SilentlyContinue | ? { $_.MainWindowHandle -ne 0 } | % { [void]$_.CloseMainWindow() }; $t=Get-Date; while(@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count -gt 0 -and ((Get-Date)-$t).TotalSeconds -lt %GRACE_SECONDS%){ Start-Sleep 3; '  aguardando: ' + ((Get-Process -Name $n -ErrorAction SilentlyContinue | % { $_.ProcessName + '(' + $_.Id + ')' }) -join ', ') }; $left=@(Get-Process -Name $n -ErrorAction SilentlyContinue); if($left.Count){ '  forcando: ' + (($left | % { $_.ProcessName + '(' + $_.Id + ')' }) -join ', '); $left | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep 3 }; if(@(Get-Process -Name $n -ErrorAction SilentlyContinue).Count){ exit 1 }"
 if errorlevel 1 (
@@ -63,6 +69,7 @@ set "UPDATE_EXIT=%ERRORLEVEL%"
 echo.
 if "%UPDATE_EXIT%"=="0" (
     echo [4/4] Update concluido. Reabrindo o Hermes...
+    call :restart_serve_remote
     if exist "%DESKTOP_EXE%" start "" "%DESKTOP_EXE%"
     echo Esta janela fecha sozinha em 20s.
     timeout /t 20 >nul
@@ -73,8 +80,16 @@ echo Log: %HERMES_HOME%\logs\desktop-update-handoff.log
 echo Voltar ao estado anterior: git -C "%INSTALL_ROOT%" reset --hard pre-update-%ROLLBACK_SHA%
 goto :reopen_fail
 
+:restart_serve_remote
+if defined SERVE_REMOTE_WAS_RUNNING if exist "%SERVE_REMOTE_VBS%" (
+    echo   religando o loop serve-remote ^(Tailscale^)...
+    start "" wscript.exe "%SERVE_REMOTE_VBS%"
+)
+exit /b 0
+
 :reopen_fail
 echo Reabrindo o Hermes para voce nao ficar sem ele...
+call :restart_serve_remote
 if exist "%DESKTOP_EXE%" start "" "%DESKTOP_EXE%"
 :fail
 pause
