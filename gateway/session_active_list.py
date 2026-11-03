@@ -14,8 +14,13 @@ from hermes_state_runtime import RuntimeStoreError
 
 def _status(live, handle, pending) -> str:
     if handle.execution_state == 'running':
-        prompts = live.controls.snapshot(handle.ref.session_id, handle.execution_generation)
-        return 'waiting' if prompts else 'working'
+        from gateway.session_server_requests import open_requests
+        sid = handle.ref.session_id
+        # Desktop's batch clarify (and sudo/secret) is a server→client request on the event stream,
+        # never a PendingControls card: without it a parked turn reads 'working' and the poll
+        # clears Desktop's amber "needs input" dot.
+        prompts = live.controls.snapshot(sid, handle.execution_generation)
+        return 'waiting' if prompts or open_requests(live.event_stream, sid) else 'working'
     # Admitted, not yet claimed by the drain: the turn exists, its agent has not started.
     return 'starting' if any(row['status'] == 'queued' for row in pending) else 'idle'
 

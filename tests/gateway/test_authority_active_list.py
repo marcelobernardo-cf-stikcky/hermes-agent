@@ -75,3 +75,18 @@ async def test_a_turn_blocked_on_a_prompt_reads_waiting(owner, monkeypatch):
     controls = owner.authority.sessions['chat'].controls
     monkeypatch.setattr(controls, 'snapshot', lambda session_id, generation: ({'kind': 'approval'},))
     assert (await owner.active())['chat']['status'] == 'waiting'
+
+
+
+def test_a_turn_blocked_on_a_viewer_request_reads_waiting(monkeypatch):
+    # Desktop's batch clarify is a server→client request, not a PendingControls card (#clarify-dot).
+    from gateway import session_server_requests as ssr
+    from gateway.session_active_list import _status
+    events = object()
+    live = SimpleNamespace(event_stream=events, controls=SimpleNamespace(snapshot=lambda sid, gen: ()))
+    handle = SimpleNamespace(execution_state='running', execution_generation=1,
+                             ref=SimpleNamespace(session_id='chat'))
+    assert _status(live, handle, []) == 'working'
+    monkeypatch.setitem(ssr._open, 'rq', ssr._Pending('chat', events=events, method='clarify',
+                                                      params={'session_id': 'chat'}))
+    assert _status(live, handle, []) == 'waiting'
