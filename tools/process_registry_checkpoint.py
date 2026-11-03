@@ -15,6 +15,10 @@ class ProcessCheckpointMixin:
         """Subclass supplies the live PID decision. See ProcessRegistry."""
         raise NotImplementedError
 
+    def kill_process(self, session_id: str, *, source: str, consume_output: bool) -> dict:
+        """Subclass supplies the verified tree kill. See ProcessRegistry."""
+        raise NotImplementedError
+
     # ----- Checkpoint (crash recovery) -----
 
     def _write_checkpoint(self, extra_entries: Optional[list[dict[str, Any]]] = None):
@@ -68,6 +72,34 @@ class ProcessCheckpointMixin:
                 and (log := adoptable_log(entry.get("output_log"))) and Path(log).exists()
                 and (_exit_path(log).exists() or self._detached_host_fate(
                     entry.get("pid"), entry.get("host_start_time")) == "running")]
+
+    @staticmethod
+    def _owner_session_reaped(entry: dict) -> Optional[str]:
+        """End reason when the job's conversation row was ended by an automatic reap (the same
+        reasons whose live reap runs kill_for_session); None when open, closed by the user on
+        purpose (that keeps background work), or unknown."""
+        import sqlite3
+        from hermes_constants import get_hermes_home
+        from hermes_state_holders import read_only_db_uri
+        from hermes_state_keys import profile_from_session_key
+        from tui_gateway.session_lifecycle import _AUTOMATIC_SESSION_END_REASONS
+        sid = entry.get("parent_session_id")
+        if not sid:
+            return None
+        try:
+            profile = profile_from_session_key(entry.get("session_key"))
+            if profile:
+                from hermes_cli.profiles import get_profile_dir
+                home = get_profile_dir(profile)
+            else:
+                home = get_hermes_home()
+            with sqlite3.connect(read_only_db_uri(home / "state.db"), uri=True, timeout=2) as con:
+                row = con.execute("SELECT ended_at, end_reason FROM sessions WHERE id = ?", (sid,)).fetchone()
+        except Exception:
+            return None
+        if row and row[0] and row[1] in _AUTOMATIC_SESSION_END_REASONS:
+            return row[1]
+        return None
 
     def recover_from_checkpoint(self) -> int:
         """On gateway startup, probe PIDs from the checkpoint file; returns how many
@@ -148,6 +180,13 @@ class ProcessCheckpointMixin:
                     self._running[session.id] = session
             recovered += 1
             logger.info("Recovered detached process: %s (pid=%d)", session.command[:60], pid)
+            # Its conversation was reaped (worker/gateway died first, so that reap's
+            # kill_for_session never saw it): nobody can poll or stop it any more.
+            if not session.persist_on_release and (reason := self._owner_session_reaped(entry)):
+                self.kill_process(session.id, source=f"owner_session_{reason}", consume_output=True)
+                recovered -= 1
+                logger.info("Killed orphan of reaped session (%s): %s (pid=%d)", reason, session.command[:60], pid)
+                continue
             # Re-enqueue watcher so gateway can resume notifications
             if session.watcher_interval > 0:
                 self.pending_watchers.append({
