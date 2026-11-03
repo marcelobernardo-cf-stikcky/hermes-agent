@@ -111,6 +111,10 @@ class GatewayConfigLoadersMixin:
     def _silence_allowed_for_source(self, source, display_kind, reply_expected, agent_result) -> bool:
         """Evaluate existing exemptions before consulting the optional room permission."""
         from gateway.response_filters import silence_allowed
+        # A transform_llm_output plugin that rewrote the reply to a silence marker (e.g. one that
+        # rerouted it to another chat) decided deliberately: never replace it with the notice.
+        if isinstance(agent_result, dict) and agent_result.get("response_transformed") is True:
+            return True
         return silence_allowed(display_kind, reply_expected) or silence_allowed(
             display_kind, reply_expected, allow_silence=self._room_allow_silence(source),
             agent_result=agent_result)

@@ -292,3 +292,11 @@ def test_primary_profile_keeps_the_supplied_config(monkeypatch, tmp_path, runtim
     source._identity = RoutingIdentity("primary", runtime, tmp_path, home, multiplexed=False)
 
     assert runner._room_allow_silence(source) is (True if expected else None)
+
+
+def test_plugin_transformed_silence_is_honoured(monkeypatch, tmp_path):
+    # A transform_llm_output plugin that reroutes a reply returns a marker: no notice in the room.
+    runner = _runner(monkeypatch, tmp_path)
+    result = {"final_response": "[SILENT]", "response_transformed": True}
+    assert runner._silence_allowed_for_source(_source(), None, True, result) is True
+    assert runner._silence_allowed_for_source(_source(), None, True, {"final_response": "[SILENT]"}) is False
