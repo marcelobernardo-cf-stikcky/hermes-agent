@@ -296,3 +296,27 @@ def test_the_watch_settles_after_the_drain_wrote_its_outcome(tmp_path, monkeypat
     # Hosts whose SQLite runs the queue in WAL mode write to the -wal file first.
     (tmp_path / "deliveries.db-wal").write_bytes(b"frame")
     assert watch.changed() is True
+
+
+def test_a_transient_os_error_resolving_a_queue_path_does_not_kill_the_watch(tmp_path, monkeypatch):
+    """WinError 1450 (no system resources) from ``Path.resolve`` escaped ``_stamp`` and killed
+    the housekeeping thread for good: no drain ran again and every queued send stayed pending."""
+    from cron import delivery_queue
+    from gateway.run_delivery_queue_watch import DeliveryQueueWatch
+
+    real = delivery_queue.queue_path
+    flaky = {"on": False}
+
+    def queue_path(home=None):
+        if flaky["on"]:
+            raise OSError(1450, "Insufficient system resources exist to complete the requested service")
+        return real(home)
+
+    monkeypatch.setattr(delivery_queue, "DELIVERY_DB", tmp_path / "deliveries.db")
+    monkeypatch.setattr(delivery_queue, "queue_path", queue_path)
+    watch = DeliveryQueueWatch(lambda: [None], lambda: None)
+    flaky["on"] = True
+    assert watch.changed() is False
+    flaky["on"] = False
+    delivery_queue.enqueue("exec-1450", {"id": "job"}, "hello")
+    assert watch.changed() is True, "the watch keeps working once the error clears"

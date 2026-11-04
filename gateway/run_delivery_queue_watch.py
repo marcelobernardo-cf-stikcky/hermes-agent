@@ -44,7 +44,12 @@ class DeliveryQueueWatch:
 
         stamps = []
         for home in self._served:
-            path = queue_path(home)
+            try:
+                path = queue_path(home)
+            except OSError:
+                # Path.resolve can fail transiently (Windows WinError 1450, no system resources);
+                # raising here killed the housekeeping thread and stopped every later drain.
+                continue
             for candidate in (path, path.with_name(path.name + "-wal")):
                 try:
                     info = os.stat(candidate)
