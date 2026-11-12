@@ -204,3 +204,16 @@ def test_register_locale_accepts_dicts_and_rejects_bad_ids(home):
         ctx.register_locale("pl", {"a": "b"}, surface="web")
     with pytest.raises(FileNotFoundError):
         ctx.register_locale("pl", home / "missing.yaml")
+
+
+def test_desktop_only_package_loads_without_init(home):
+    """A unified package whose only half is ``desktop/`` (no Python) is not a load failure."""
+    plugin = home / "plugins" / "taskbar-badge"
+    (plugin / "desktop").mkdir(parents=True)
+    (plugin / "desktop" / "plugin.js").write_text("export default {}", encoding="utf-8")
+    (plugin / "plugin.yaml").write_text(yaml.safe_dump({"name": "taskbar-badge", "version": "0.1.0"}),
+                                        encoding="utf-8")
+    (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": ["taskbar-badge"]}}),
+                                      encoding="utf-8")
+    loaded = _load(home)._plugins["taskbar-badge"]
+    assert loaded.enabled and not loaded.error, loaded.error
