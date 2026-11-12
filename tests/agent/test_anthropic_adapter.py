@@ -1817,7 +1817,8 @@ def test_oauth_system_prompt_sanitizer_preserves_docs_url():
                     "Docs: https://hermes-agent.nousresearch.com/docs ; "
                     "interpreter ~/.hermes/hermes-agent/venv/bin/python ; "
                     "source github.com/NousResearch/hermes-agent ; mail hermes-agent@example.com ; "
-                    "skill_view(name='hermes-agent') ; hermes-agent's docs ; built by hermes-agent."
+                    "skill_view(name='hermes-agent') ; hermes-agent's docs ; built by hermes-agent.\n"
+                    "    - claude-code: Delegate coding.\n    - hermes-agent: Use, configure."
                 ),
             },
             {"role": "user", "content": "Hi"},
@@ -1839,7 +1840,8 @@ def test_oauth_system_prompt_sanitizer_preserves_docs_url():
     assert "skill_view(name='hermes-agent')" in system_text  # a quoted slug is an identifier
     assert "built by claude-code." in system_text  # a sentence-final dot is prose
     assert "claude-code's docs" in system_text  # so is a possessive
-    assert kwargs["system"][-1]["text"].count("claude-code") == 3  # the caller's block, not the CC prefix
+    assert "- hermes-agent: Use, configure." in system_text  # skills-index entry keeps its real name
+    assert kwargs["system"][-1]["text"].count("claude-code") == 4  # 3 rewrites + the real claude-code skill
 
 
 def test_unsupported_inline_image_subtype_downgrades_to_text_for_anthropic(monkeypatch):

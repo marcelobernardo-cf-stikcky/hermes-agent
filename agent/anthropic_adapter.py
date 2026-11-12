@@ -582,8 +582,10 @@ _OAUTH_SYSTEM_REPLACEMENTS = (
 # or quoted as an identifier (``hermes-agent.nousresearch.com``, ``~/.hermes/hermes-agent/venv``,
 # ``NousResearch/hermes-agent``, ``skill_view(name='hermes-agent')``) it is an address the model
 # dereferences, and the rewritten form does not exist (#48860). The OPENING quote marks an
-# identifier; a sentence-final ``.`` or a possessive ``'s`` is prose.
-_OAUTH_SLUG_PATTERN = re.compile(r"""(?<![\w./:@'"`-])hermes-agent(?![\w/@-]|\.\w)""")
+# identifier; a sentence-final ``.`` or a possessive ``'s`` is prose. A trailing ``:`` is the
+# skills-index entry (``- hermes-agent: …``): rewriting it collides with the real
+# ``claude-code`` skill and orphans every ``skill_view(name='hermes-agent')`` pointer.
+_OAUTH_SLUG_PATTERN = re.compile(r"""(?<![\w./:@'"`-])hermes-agent(?![\w/@:-]|\.\w)""")
 
 
 def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_wire):
