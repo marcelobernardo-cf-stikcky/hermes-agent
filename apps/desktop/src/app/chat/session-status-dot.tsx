@@ -50,12 +50,13 @@ const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
     role: 'status',
     title: r => r.sessionRunning
   },
-  // Hollow muted — a terminal(background=true) process outlived the turn. An
-  // outline reads as "still open" without claiming the model is working; a
-  // filled grey dot read as finished, the opposite of what this means.
+  // Hollow accent — subagents or a terminal(background=true) process outlived
+  // the turn. Accent because work IS running (a grey ring read as idle); hollow
+  // so it stays distinct from the parent turn itself producing. The row's arc
+  // carries the motion, same as working.
   background: {
     ariaLabel: r => r.backgroundRunning,
-    className: `${DOT_BASE} border border-(--ui-text-tertiary)`,
+    className: `${DOT_BASE} border border-(--ui-accent)`,
     role: 'status',
     title: r => r.backgroundRunning
   },
