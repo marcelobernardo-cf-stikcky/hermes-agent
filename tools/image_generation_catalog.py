@@ -159,8 +159,8 @@ FAL_MODELS: dict[str, dict[str, Any]] = {
     # Same minimum pixel count as GPT Image 2; keep medium quality explicit
     # rather than inheriting FAL's higher-cost high default.
     **{
-        f"openai/gpt-image-2.5/{variant}/text-to-image": _model(
-            f"GPT Image 2.5 {variant.title()}", speed, strengths, "Token-based pricing",
+        f"openai/gpt-image-{ver}/{variant}/text-to-image": _model(
+            f"GPT Image {ver} {variant.title()}", speed, strengths, "Token-based pricing",
             sizes={
                 "landscape": "landscape_4_3", "square": "square_hd", "portrait": "portrait_4_3",
             },
@@ -169,13 +169,14 @@ FAL_MODELS: dict[str, dict[str, Any]] = {
                 "prompt", "image_size", "quality", "num_images", "output_format", "background",
                 "output_compression", "sync_mode",
             },
-            edit_endpoint=f"openai/gpt-image-2.5/{variant}/edit",
+            edit_endpoint=f"openai/gpt-image-{ver}/{variant}/edit",
             edit_supports={
                 "prompt", "image_urls", "image_size", "quality", "num_images", "output_format",
                 "background", "output_compression", "sync_mode", "mask_url", "input_fidelity",
             },
             max_reference_images=16,
         )
+        for ver in ("2.5", "2.6")
         for variant, speed, strengths in (
             ("flare", "Fast", "Everyday creation, natural lighting and textures"),
             ("sunburst", "Slower", "Precision editing, subject and composition consistency"),

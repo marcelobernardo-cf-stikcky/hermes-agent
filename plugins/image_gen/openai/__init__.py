@@ -27,7 +27,7 @@ MODELS = {
     **{key: {**meta, "api_model": API_MODEL} for key, meta in GPT_IMAGE_2_TIERS.items()},
     **{
         model if quality == "auto" else f"{model}-{quality}": {
-            "display": f"GPT Image 2.5 {name} ({quality.title()})",
+            "display": f"GPT Image {model[10:13]} {name} ({quality.title()})",
             "speed": speed,
             "strengths": strengths,
             "api_model": model,
@@ -36,6 +36,8 @@ MODELS = {
         for model, name, speed, strengths in (
             ("gpt-image-2.5-flare", "Flare", "Fast", "Everyday image generation and editing"),
             ("gpt-image-2.5-sunburst", "Sunburst", "Slower", "Precision generation and editing"),
+            ("gpt-image-2.6-flare", "Flare", "Fast", "Everyday image generation and editing"),
+            ("gpt-image-2.6-sunburst", "Sunburst", "Slower", "Precision generation and editing"),
         )
         for quality in ("auto", "low", "medium", "high", "xhigh", "max")
     },
