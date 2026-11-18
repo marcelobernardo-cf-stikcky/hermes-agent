@@ -60,7 +60,7 @@ def test_create_task_rejects_missing_skill_before_insert(profile_homes):
 
 
 def test_dispatch_skips_missing_skill_without_run_or_failure(profile_homes):
-    root, assignee_home = profile_homes
+    _, assignee_home = profile_homes
     _skill(assignee_home, "present-then-removed")
     with kbc.connect() as conn:
         task_id = kb.create_task(
@@ -79,6 +79,10 @@ def test_dispatch_skips_missing_skill_without_run_or_failure(profile_homes):
         assert kb.list_runs(conn, task_id) == []
         assert task.consecutive_failures == 0
 
+        kbd.dispatch_once(conn, spawn_fn=lambda *_args: pytest.fail("spawned"))
+        skipped = [e for e in kb.list_events(conn, task_id) if e.kind == "skipped_unknown_skill"]
+        assert len(skipped) == 1  # board evidence, written once per cause
+        assert (skipped[0].payload or {}).get("missing") == ["present-then-removed"]
 
 def test_existing_assignee_skill_spawns_normally(profile_homes):
     _, assignee_home = profile_homes

@@ -2134,6 +2134,17 @@ def _dispatch_lane_task(
     _missing = _kb._unknown_profile_skills(assignee, _requested if isinstance(_requested, list) else [])
     if _missing:
         result.skipped_unknown_skill.append((task_id, _missing))
+        # Card-visible diagnostic, written once per distinct cause: without it a
+        # review card sat 108 min in 'review' with zero board evidence.
+        if not dry_run:
+            payload = {"assignee": assignee, "missing": _missing}
+            with _kb.write_txn(conn):
+                last = conn.execute(
+                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
+                    "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
+                if (last is None or last["kind"] != "skipped_unknown_skill"
+                        or last["payload"] != _kb._json_or_null(payload)):
+                    _kb._append_event(conn, task_id, "skipped_unknown_skill", payload)
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
