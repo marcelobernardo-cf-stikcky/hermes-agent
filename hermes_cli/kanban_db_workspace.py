@@ -686,8 +686,37 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
-def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
-    """Materialize ``target`` as a linked git worktree under ``repo_root``."""
+def _merged_base(repo_root: Path, base_refs: tuple[str, ...]) -> Optional[str]:
+    """Start point for a child task's new branch: its parents' branches merged.
+
+    Parents whose branch is gone are skipped; none left -> ``None`` (caller uses
+    HEAD). Merges without a checkout (``merge-tree --write-tree``); any conflict
+    -> ``None``, and the dispatcher's ancestry check reports the missing parents.
+    """
+    refs = [r for r in dict.fromkeys(base_refs) if r and _git_branch_exists(repo_root, r)]
+    if not refs:
+        return None
+    base = refs[0]
+    for ref in refs[1:]:
+        tree = _git(repo_root, "merge-tree", "--write-tree", base, ref, timeout=60)
+        if tree.returncode != 0:
+            return None
+        commit = _git(
+            repo_root, "-c", "user.name=hermes-kanban", "-c", "user.email=kanban@hermes.local",
+            "commit-tree", tree.stdout.split()[0], "-p", base, "-p", ref,
+            "-m", f"kanban: base merge {base} + {ref}", timeout=60,
+        )
+        if commit.returncode != 0:
+            return None
+        base = commit.stdout.strip()
+    return base
+
+
+def _ensure_git_worktree(
+    repo_root: Path, target: Path, branch_name: str, base_refs: tuple[str, ...] = (),
+) -> None:
+    """Materialize ``target`` as a linked git worktree under ``repo_root``. A new
+    branch starts from ``base_refs`` merged (the parents' branches), else HEAD."""
     target = target.expanduser()
     repo_common = _git_common_dir(repo_root)
     if target.exists() and repo_common is not None and _path_key(_git_common_dir(target)) == _path_key(repo_common):
@@ -696,7 +725,7 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     if _git_branch_exists(repo_root, branch_name):
         args = ["worktree", "add", str(target), branch_name]
     else:
-        args = ["worktree", "add", "-b", branch_name, str(target), "HEAD"]
+        args = ["worktree", "add", "-b", branch_name, str(target), _merged_base(repo_root, base_refs) or "HEAD"]
     result = _git(repo_root, *args, timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
@@ -705,14 +734,18 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
         )
 
 
-def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple[Path, str]:
+def _anchored_worktree(
+    repo_root: Path, task_id: str, branch_name: str, base_refs: tuple[str, ...] = (),
+) -> tuple[Path, str]:
     """Materialize the canonical ``<repo>/.worktrees/<task-id>`` worktree."""
     target = repo_root / ".worktrees" / task_id
-    _ensure_git_worktree(repo_root, target, branch_name)
+    _ensure_git_worktree(repo_root, target, branch_name, base_refs)
     return target, branch_name
 
 
-def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
+def _resolve_worktree_workspace(
+    task: Task, *, board: Optional[str] = None, base_refs: tuple[str, ...] = (),
+) -> tuple[Path, str]:
     """Resolve + materialize a linked git worktree for ``task``. With no
     ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
@@ -741,7 +774,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
                 f"task {task.id} has workspace_kind=worktree but board "
                 f"{board_slug!r} default_workdir {board_default!r} is not inside a git repo"
             )
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        return _anchored_worktree(repo_root, task.id, branch_name, base_refs)
 
     requested = Path(task.workspace_path).expanduser()
     if not requested.is_absolute():
@@ -764,7 +797,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
         if fallback_root is not None:
             fallback = fallback_root / ".worktrees" / task.id
             if _path_key(fallback.resolve(strict=False)) != _path_key(requested_resolved):
-                _ensure_git_worktree(fallback_root, fallback, branch_name)
+                _ensure_git_worktree(fallback_root, fallback, branch_name, base_refs)
                 return fallback.resolve(strict=False), branch_name
         # No repo to anchor a fallback on (or the occupied path IS this task's
         # own canonical worktree): keep the legacy reuse rather than fail dispatch.
@@ -772,7 +805,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
 
     repo_root = _git_toplevel(requested)
     if repo_root is not None and _path_key(requested_resolved) == _path_key(repo_root):
-        return _anchored_worktree(repo_root, task.id, branch_name)
+        return _anchored_worktree(repo_root, task.id, branch_name, base_refs)
 
     repo_root = _repo_root_for_worktree_target(requested.parent)
     if repo_root is None:
@@ -780,7 +813,7 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
             f"task {task.id} worktree path {task.workspace_path!r} is not inside a git repo "
             "and does not point at a git repo root"
         )
-    _ensure_git_worktree(repo_root, requested, branch_name)
+    _ensure_git_worktree(repo_root, requested, branch_name, base_refs)
     return requested, branch_name
 
 

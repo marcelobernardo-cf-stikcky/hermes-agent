@@ -2185,7 +2185,11 @@ def _dispatch_lane_task(
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":
-            workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
+            parent_refs = _parent_branch_refs(conn, claimed.id)
+            workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(
+                claimed, board=board, base_refs=parent_refs,
+            )
+            _warn_missing_parent_code(conn, claimed.id, workspace, parent_refs)
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
     except Exception as exc:
@@ -2230,6 +2234,38 @@ def _dispatch_lane_task(
         ):
             result.auto_blocked.append(claimed.id)
         return False
+
+
+def _parent_branch_refs(conn: sqlite3.Connection, task_id: str) -> tuple[str, ...]:
+    """Branches of the task's parents, so a child starts on top of their code."""
+    refs = []
+    for pid in _kb.parent_ids(conn, task_id):
+        parent = _kb.get_task(conn, pid)
+        if parent is not None and (parent.workspace_kind or "") == "worktree":
+            refs.append((parent.branch_name or "").strip() or f"wt/{pid}")
+    return tuple(refs)
+
+
+def _warn_missing_parent_code(
+    conn: sqlite3.Connection, task_id: str, workspace, parent_refs: tuple[str, ...],
+) -> None:
+    """Comment on the card when its worktree lacks a parent's commits (parent
+    branch gone, conflicting parents, or a pre-existing branch). Best-effort."""
+    try:
+        from pathlib import Path as _P
+        missing = [
+            r for r in parent_refs
+            if _kbw._git_branch_exists(_P(workspace), r)
+            and _kbw._git(_P(workspace), "merge-base", "--is-ancestor", r, "HEAD", timeout=30).returncode == 1
+        ]
+        if missing:
+            _kb.add_comment(
+                conn, task_id, "dispatcher",
+                "Worktree sem o código dos pais: " + ", ".join(missing)
+                + " (branch conflitou ou já existia). Monte a base antes de implementar; não reimplemente o pai.",
+            )
+    except Exception as exc:  # never block a spawn on a diagnostic
+        _kb._log.warning("kanban dispatcher: parent-code check failed for %s: %s", task_id, exc)
 
 
 def _apply_default_assignee(
