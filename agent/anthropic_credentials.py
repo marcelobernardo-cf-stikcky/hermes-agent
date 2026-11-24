@@ -833,3 +833,108 @@ def _write_hermes_oauth_credentials(
         {"accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at_ms},
         "Hermes OAuth credentials",
     )
+
+
+# ── Automatic recovery: adopt any live local Claude Code login ─────────────────────────────────────
+#
+# A resolve that finds nothing raises "No Anthropic credentials found" and the turn dies. The
+# recoverable case is a login Hermes never looked at: an account switcher keeps extra Claude Code
+# logins under <hermes home>/claude-accounts/<name>/.credentials.json, and any of them can be fresher
+# than the shared ~/.claude file. Adopting one into Hermes' own store makes every later resolve work
+# with no human in the loop. Only a login nobody owns (all grants dead) still needs the browser.
+
+_AUTO_RECOVERY_LOCK = threading.Lock()
+_AUTO_RECOVERY_COOLDOWN_S = 300.0
+_auto_recovery_last_attempt = 0.0
+
+
+def _store_expiry(path: Path) -> int:
+    data = _load_json_if_exists(path, str(path))
+    record = _claude_oauth_record(data, str(path)) if data is not None else None
+    return int((record or {}).get("expiresAt") or 0)
+
+
+def local_claude_credential_stores() -> list[Path]:
+    """Every Claude Code OAuth store on this machine, freshest expiry first (shared file + account dirs)."""
+    homes = {get_hermes_home()}
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_default_hermes_root
+        homes.add(get_default_hermes_root())
+    stores = [claude_code_credentials_path()]
+    stores += [p for home in homes for p in sorted(Path(home).glob("claude-accounts/*/.credentials.json"))]
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in stores:
+        key = str(path.expanduser().resolve(strict=False)).lower()
+        if key in seen or not path.exists():
+            continue
+        seen.add(key)
+        unique.append(path)
+    return sorted(unique, key=_store_expiry, reverse=True)
+
+
+def _rotate_store_credentials(path: Path, original: Any, creds: dict[str, Any]) -> None:
+    """Write a refreshed token triple back into *path*, preserving the metadata Claude Code reads (scopes)."""
+    payload = dict(original) if isinstance(original, dict) else {}
+    oauth = dict(payload.get("claudeAiOauth") or {})
+    oauth.update({"accessToken": creds["accessToken"], "refreshToken": creds.get("refreshToken", ""),
+                  "expiresAt": creds.get("expiresAt", 0)})
+    payload["claudeAiOauth"] = oauth
+    _commit_private_json(path, payload, "credentials")
+
+
+def adopt_local_claude_login() -> Optional[dict[str, Any]]:
+    """Commit the first usable local Claude Code login into Hermes' own OAuth store.
+
+    Expired stores are refreshed first; the rotation is written back to the store it came from so the
+    CLI that owns it keeps working, and into Hermes' store so later resolves need no sweep. A dead
+    grant is skipped (never replayed) and the next store is tried. ``None`` when nothing is usable.
+    """
+    from agent.credential_sources import adopt_external_logins_enabled
+    if not adopt_external_logins_enabled():
+        return None
+    for path in local_claude_credential_stores():
+        data = _load_json_if_exists(path, str(path))
+        creds = _claude_oauth_record(data, "claude_code_credentials_file") if data is not None else None
+        if not creds:
+            continue
+        if not is_claude_code_token_valid(creds):
+            refresh_token = creds.get("refreshToken") or ""
+            if not refresh_token or is_rotation_consumed_uncommitted(refresh_token, source_path=path):
+                continue
+            try:
+                state = refresh_anthropic_oauth_pure(refresh_token)
+            except Exception as exc:
+                logger.debug("Local Claude login at %s cannot be refreshed: %s", path, exc)
+                continue
+            creds = {**creds, "accessToken": state["access_token"], "refreshToken": state["refresh_token"],
+                     "expiresAt": state["expires_at_ms"]}
+            with contextlib.suppress(Exception):
+                _rotate_store_credentials(path, data, creds)
+        try:
+            _write_hermes_oauth_credentials(creds["accessToken"], creds.get("refreshToken"), creds.get("expiresAt"))
+        except CredentialPersistError as exc:
+            logger.warning("Adopted a login at %s but could not commit it for Hermes: %s", path, exc)
+        else:
+            logger.info("Adopted the Claude Code login at %s as Hermes' Anthropic credential", path)
+        return creds
+    return None
+
+
+def auto_recover_anthropic_login() -> Optional[str]:
+    """One automatic login attempt after a failed Anthropic resolve (at most once per 5 min per process).
+
+    Only adopts a live local Claude Code login: a browser PKCE prompt cannot complete without a human,
+    and popping one out of a background resolve hangs the turn and hijacks the desktop. Returns the new
+    token or None.
+    """
+    global _auto_recovery_last_attempt
+    if _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        return None  # an explicit credential exists: the failure is not a missing login
+    with _AUTO_RECOVERY_LOCK:
+        now = time.monotonic()
+        if now - _auto_recovery_last_attempt < _AUTO_RECOVERY_COOLDOWN_S:
+            return None
+        _auto_recovery_last_attempt = now
+        adopted = adopt_local_claude_login()
+        return adopted["accessToken"] if adopted else None

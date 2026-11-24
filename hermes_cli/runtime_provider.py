@@ -353,7 +353,8 @@ def _maybe_apply_codex_app_server_runtime(*, provider: str, api_mode: str, model
 # ── base_url / credential helpers ──────────────────────────────────────────────────────────
 
 _ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
-_NO_ANTHROPIC_CREDENTIALS_MSG = ("No Anthropic credentials found. Run 'hermes auth add anthropic' to sign in, "
+_NO_ANTHROPIC_CREDENTIALS_MSG = ("No Anthropic credentials found. Sign in to Claude Code (Hermes adopts that login "
+                                 "automatically) or run 'hermes auth add anthropic' to sign in, "
                                  "or set ANTHROPIC_TOKEN / ANTHROPIC_API_KEY.")
 
 
@@ -410,8 +411,16 @@ def _anthropic_cfg_base_url(model_cfg: dict[str, Any]) -> str:
 
 
 def _anthropic_token_or_raise(*, model: str | None = None) -> str:
-    from agent.anthropic_credentials import resolve_anthropic_token
+    from agent.anthropic_credentials import auto_recover_anthropic_login, resolve_anthropic_token
     token = resolve_anthropic_token(model=model)
+    if not token and not resolve_anthropic_token():
+        # Nothing resolves for any model: the login itself is gone. Try to obtain one before failing
+        # the turn — adopt a live local Claude Code login, or (in a terminal) run the browser login.
+        recovered = auto_recover_anthropic_login()
+        if recovered:
+            # A fresh login can resolve to None here when the pool is not seeded for this route
+            # (providers seed singletons only when explicitly configured); use it directly.
+            token = resolve_anthropic_token(model=model) or recovered
     if not token:
         # A key the pool benched for *this* model is not a missing credential; telling the
         # user to re-authenticate would send them chasing a cooldown that lifts on its own.
