@@ -1178,3 +1178,23 @@ def test_gc_purges_blocked_task_that_never_done(kanban_home):
         assert kbn.list_notify_subs(conn, tid) == []
     finally:
         conn.close()
+
+def test_dependency_edge_does_not_leak_parent_subs_into_session_owned_child(kanban_home):
+    """A card created by a live session must not inherit another workstream's
+    subscribers through a dependency edge (create parents= or link_tasks)."""
+    import hermes_cli.kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
+
+    conn = kbc.connect()
+    try:
+        parent = kb.create_task(conn, title="cg card", assignee=None, session_id="sess-cg")
+        _add_full_parent_sub(kb, conn, parent)
+        via_create = kb.create_task(conn, title="psf card", assignee="w1",
+                                    parents=[parent], session_id="sess-psf")
+        linked = kb.create_task(conn, title="psf card 2", assignee="w1", session_id="sess-psf")
+        kb.link_tasks(conn, parent, linked)
+        assert kbn.list_notify_subs(conn, via_create) == []
+        assert kbn.list_notify_subs(conn, linked) == []
+    finally:
+        conn.close()

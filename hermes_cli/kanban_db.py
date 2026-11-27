@@ -1329,7 +1329,7 @@ def create_task(
                         )
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
-                _inherit_notify_subs(conn, task_id, parents, created_at=now)
+                _inherit_notify_subs(conn, task_id, parents, created_at=now, dependency=True)
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -1370,7 +1370,7 @@ def _missing_task_ids(conn: sqlite3.Connection, ids: Iterable[str]) -> list[str]
 
 def _inherit_notify_subs(
     conn: sqlite3.Connection, child_id: str, parents: Iterable[str], *,
-    created_at: Optional[int] = None,
+    created_at: Optional[int] = None, dependency: bool = False,
 ) -> None:
     """Copy parents' notify subscriptions to a child, cursor caught up to the
     child's current event so a late ``link_tasks`` never replays history.
@@ -1385,6 +1385,14 @@ def _inherit_notify_subs(
     parent_ids = tuple(dict.fromkeys(p for p in parents if p))
     if not parent_ids:
         return
+    if dependency:
+        # A dependency edge is gating, not ownership: a card created by a live session
+        # (session_id set; that session auto-subscribes itself) must not pick up the
+        # subscribers of another workstream's parent, or that session gets woken by
+        # cards it never owned. Session-less children (CLI/cron) keep inheriting.
+        own = conn.execute("SELECT session_id FROM tasks WHERE id = ?", (child_id,)).fetchone()
+        if own is not None and own["session_id"]:
+            return
     row = conn.execute(
         "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?", (child_id,),
     ).fetchone()
@@ -1593,7 +1601,7 @@ def link_tasks(
             "linked",
             {"parent": parent_id, "child": child_id},
         )
-        _inherit_notify_subs(conn, child_id, (parent_id,))
+        _inherit_notify_subs(conn, child_id, (parent_id,), dependency=True)
     return gated
 
 
