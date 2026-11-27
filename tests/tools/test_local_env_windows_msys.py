@@ -235,6 +235,19 @@ class TestWindowsMsysPathconvDefaults:
         run_env = _make_run_env({"MSYS2_ARG_CONV_EXCL": "/custom"})
         assert run_env.get("MSYS2_ARG_CONV_EXCL") == "/custom"
 
+    def test_tmpdir_is_the_native_scratch_path(self, tmp_path):
+        # Left unset, Git Bash derives TMPDIR="/tmp" from %TEMP%; with argument conversion off a
+        # native git/node reads "$TMPDIR/x" as C:\tmp\x, outside Hermes' pruned scratch dir.
+        env = {"HERMES_HOME": str(tmp_path)}
+        local_mod._apply_windows_msys_bash_env_defaults(env)
+        assert env["TMPDIR"] == (tmp_path / "cache" / "scratch").as_posix()
+        assert os.path.isdir(env["TMPDIR"])
+
+    def test_tmpdir_respects_user_override(self, tmp_path):
+        env = {"HERMES_HOME": str(tmp_path), "TMPDIR": "D:/mine"}
+        local_mod._apply_windows_msys_bash_env_defaults(env)
+        assert env["TMPDIR"] == "D:/mine"
+
 
 # ---------------------------------------------------------------------------
 # Git Bash coreutils on PATH — non-login ``bash -c`` fallback (empty

@@ -164,3 +164,18 @@ def test_restore_keeps_its_target_alive_while_taking_the_safety_snapshot(history
     result = manager.restore(str(project), target)
     assert result["success"], result
     assert (project / "old.bin").stat().st_size == 1_300_000
+
+
+def test_reclaim_gc_outlives_the_per_call_git_timeout(tmp_path):
+    """A multi-GB loose store needs minutes to gc; at 3x the per-call timeout (90 s) it was killed
+    every prune, so the store never shrank."""
+    from tools.checkpoint_pruning import Pruner
+
+    timeouts = {}
+
+    def run_git(args, store, cwd, timeout=30, **kwargs):
+        timeouts[args[0]] = timeout
+        return True, "", ""
+
+    Pruner(run_git, tmp_path, str(tmp_path), 30, lambda _: 0, "refs/hermes/").reclaim()
+    assert timeouts["gc"] >= 15 * 60

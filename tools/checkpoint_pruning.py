@@ -13,6 +13,9 @@ class PruneError(RuntimeError):
 
 
 GC_PENDING_NAME = ".gc-pending"
+# A multi-GB store of loose objects needs minutes, not the 3x per-call timeout (90 s): the gc was
+# killed every run, the store never shrank and grew to 31 GB. Bounded only so a hung git still ends.
+GC_TIMEOUT_SECONDS = 1800
 
 
 def store_lock_path(base: Path) -> Path:
@@ -55,7 +58,7 @@ class Pruner:
         """Full ``git gc`` — tens of seconds on a GB store, so only the periodic prune calls it.
         A ref rewrite that ran without it leaves a marker so the next prune reclaims."""
         self._git(["reflog", "expire", "--expire=now", "--all"])
-        self._git(["gc", "--prune=now", "--quiet"], timeout=self.timeout * 3)
+        self._git(["gc", "--prune=now", "--quiet"], timeout=max(self.timeout * 3, GC_TIMEOUT_SECONDS))
         # Bare stores must remain usable when gc packs all refs.
         for name in ("refs/heads", "branches"):
             (self.store / name).mkdir(parents=True, exist_ok=True)

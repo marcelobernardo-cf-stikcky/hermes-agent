@@ -765,6 +765,12 @@ def _apply_windows_msys_bash_env_defaults(env: dict) -> None:
     if _IS_WINDOWS:
         env.setdefault("MSYS_NO_PATHCONV", "1")
         env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
+        if not env.get("TMPDIR"):
+            # Without it /etc/profile derives TMPDIR from %TEMP%, which the usertemp mount turns into
+            # "/tmp"; with argument conversion off, native git/node then read "$TMPDIR/x" as C:\tmp\x
+            # (63 GB of clones there, never pruned). A native forward-slash scratch path works in both.
+            from hermes_constants import get_scratch_dir
+            env["TMPDIR"] = get_scratch_dir(env.get("HERMES_HOME") or None, prune=False).as_posix()
 
 
 def _path_env_key(run_env: dict) -> str | None:

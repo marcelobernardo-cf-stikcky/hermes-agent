@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -144,6 +145,15 @@ def rmtree_collecting_permission_errors(entry: Path) -> list[str]:
     blockers: list[str] = []
 
     def _onexc(func, path, exc):
+        if sys.platform == "win32" and func in (os.unlink, os.remove, os.rmdir) and is_permission_error(exc):
+            # Windows refuses to delete read-only files (git marks every object/pack read-only):
+            # clear the attribute and retry once, or each finished clone is left half-removed.
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+                return
+            except OSError:
+                pass
         if is_permission_error(exc):
             # scandir/open of a dir fails on the dir itself; unlink/rmdir on its parent's perms.
             blocker = path if func in (os.scandir, os.open, os.lstat) else os.path.dirname(path)
