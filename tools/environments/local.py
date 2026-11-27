@@ -869,6 +869,10 @@ def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
     return "\n".join(prelude) + "\n" + cmd_string
 
 
+_WINDOWS_NATIVE_TMPDIR = ('[ -n "$TMPDIR" ] && command -v cygpath >/dev/null 2>&1 '
+                          '&& export TMPDIR="$(cygpath -m "$TMPDIR")"\n')
+
+
 def _append_dropped_path_entries(cmd_string: str, parent_path: str) -> str:
     """Prepend a line that re-appends *parent_path* dirs the login profile dropped.
 
@@ -882,7 +886,10 @@ def _append_dropped_path_entries(cmd_string: str, parent_path: str) -> str:
     Background commands (``ProcessRegistry.spawn_local``, ``bash -lic``, no snapshot) use
     this same prelude so the two paths cannot diverge."""
     if _IS_WINDOWS:
-        return cmd_string  # native PATH stays ``;``-joined; bash sees a converted copy
+        # Native PATH stays ``;``-joined; bash sees a converted copy. MSYS also rewrites TMPDIR to
+        # "/c/..." at startup, which native tools (MSYS_NO_PATHCONV) resolve as C:\c\...: pin it back
+        # to the mixed C:/... form that both bash and native tools read the same way.
+        return _WINDOWS_NATIVE_TMPDIR + cmd_string
     # Relative entries resolve against the shell's cwd, not ours, so only absolute ones are checked.
     entries = [d for d in dict.fromkeys(parent_path.split(":"))
                if d and (not os.path.isabs(d) or os.path.isdir(d))]

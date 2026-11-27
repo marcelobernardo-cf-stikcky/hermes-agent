@@ -30,6 +30,8 @@ host ``_IS_WINDOWS`` is already False, so no patching is needed at all.
 """
 
 import os
+import shutil
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -356,3 +358,16 @@ def test_git_bash_dirs_stay_first_when_hermes_tools_move_behind_the_users(monkey
     monkeypatch.setattr(local_mod, "_git_bash_bin_dirs", lambda: [bash_dir])
     path = os.pathsep.join([bash_dir, node_dir, system32])
     assert local_mod._user_tools_first(path).split(os.pathsep) == [bash_dir, system32, node_dir]
+
+
+@pytest.mark.platforms("windows")
+def test_login_bash_hands_native_tools_a_native_tmpdir(tmp_path):
+    # MSYS rewrites TMPDIR to "/c/..." at startup; a native tool given "$TMPDIR/x" under
+    # MSYS_NO_PATHCONV then wrote to C:\c\... (a ghost tree outside the pruned scratch dir).
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("Git Bash not on PATH")
+    env = dict(os.environ, TMPDIR=tmp_path.as_posix(), MSYS_NO_PATHCONV="1")
+    script = local_mod._append_dropped_path_entries('printf %s "$TMPDIR"', env["PATH"])
+    out = subprocess.run([bash, "-l", "-c", script], env=env, capture_output=True, text=True, timeout=60, check=True).stdout
+    assert out == tmp_path.as_posix()
