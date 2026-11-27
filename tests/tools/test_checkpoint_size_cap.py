@@ -179,3 +179,16 @@ def test_reclaim_gc_outlives_the_per_call_git_timeout(tmp_path):
 
     Pruner(run_git, tmp_path, str(tmp_path), 30, lambda _: 0, "refs/hermes/").reclaim()
     assert timeouts["gc"] >= 15 * 60
+
+
+def test_a_failed_gc_leaves_the_store_recognisable(tmp_path):
+    """gc deletes the emptied refs/ tree before it can be killed; without refs/ git no longer
+    treats the store as a repository and every later checkpoint fails."""
+    from tools.checkpoint_pruning import Pruner, PruneError
+
+    def run_git(args, store, cwd, timeout=30, **kwargs):
+        return (False, "", "timed out") if args[0] == "gc" else (True, "", "")
+
+    with pytest.raises(PruneError):
+        Pruner(run_git, tmp_path, str(tmp_path), 30, lambda _: 0, "refs/hermes/").reclaim()
+    assert (tmp_path / "refs" / "heads").is_dir()

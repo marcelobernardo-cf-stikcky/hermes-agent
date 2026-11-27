@@ -58,10 +58,13 @@ class Pruner:
         """Full ``git gc`` — tens of seconds on a GB store, so only the periodic prune calls it.
         A ref rewrite that ran without it leaves a marker so the next prune reclaims."""
         self._git(["reflog", "expire", "--expire=now", "--all"])
-        self._git(["gc", "--prune=now", "--quiet"], timeout=max(self.timeout * 3, GC_TIMEOUT_SECONDS))
-        # Bare stores must remain usable when gc packs all refs.
-        for name in ("refs/heads", "branches"):
-            (self.store / name).mkdir(parents=True, exist_ok=True)
+        try:
+            self._git(["gc", "--prune=now", "--quiet"], timeout=max(self.timeout * 3, GC_TIMEOUT_SECONDS))
+        finally:
+            # gc packs refs and deletes the emptied refs/ tree; a gc that dies after that step
+            # left a store git no longer recognises, so restore the dirs on every exit.
+            for name in ("refs/heads", "branches"):
+                (self.store / name).mkdir(parents=True, exist_ok=True)
         try:
             (self.store / GC_PENDING_NAME).unlink()
         except OSError:
